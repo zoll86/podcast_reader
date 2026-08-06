@@ -892,7 +892,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v51';
+const APP_VER='v52';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -1819,35 +1819,47 @@ const SYS_TR='You translate an English audiobook for a Hungarian language learne
    A szótári alakot és a szófajt is tőle kérjük: jobb, mint bármilyen szabályalapú
    tövezés, főleg rendhagyó igéknél. A tulajdonneveket 'pn'-nel jelöli, azok soha nem
    kerülnek a szókincsbankba. */
-const SYS_TR_W=SYS_TR.replace(
- 'Return ONLY a JSON array of strings, one per input sentence, no numbering inside the strings, no markdown fence, no commentary.',
- 'For EACH sentence also pick 3-5 content words that carry meaning (nouns first, then verbs, '+
- 'then adjectives; never articles, auxiliaries or prepositions). For each picked word give: '+
- 'the surface form as heard, its dictionary form (lemma), its part of speech as one of '+
- 'n/v/adj/adv/pn (pn = proper name), the Hungarian word or phrase that renders it in your '+
- 'translation, and the English word inserted into the Hungarian sentence in place of that '+
- 'Hungarian word, correctly suffixed Hungarian-style with a hyphen (e.g. "dream-eket", '+
- '"script-et", "reality-t"). '+
- 'Additionally, if the sentence contains a SHORT self-contained English clause of 3 to 6 '+
- 'words that works as a ready-made phrase on its own (e.g. "that is the whole point", '+
- '"it does not have to be that"), list at most two of them as pairs of the English clause '+
- 'and the exact Hungarian span in your translation that renders it. Skip this if there is '+
- 'no such clause. Return ONLY a JSON array, one object per input sentence: '+
- '{"hu":"<translation>","w":[["surface","lemma","pos","hungarian","suffixed"],...],'+
- '"c":[["english clause","magyar szakasz"],...]}. No markdown fence, no commentary.');
+/* v52: A FORDÍTÁS ÉS A SZÓPÁR-GYÁRTÁS SZÉTVÁLASZTVA. Eddig bekapcsolt
+   szópároknál MINDEN fordítás a nehéz, kombinált prompton ment: 10 mondat ×
+   (fordítás + 3-5 szópár + tagmondatok) JSON-objektumokban, 2800 token
+   plafonnal. Hosszú mondatoknál a válasz csordult, a JSON csonkult, a parse
+   elhasalt, és az egész köteg visszaesett sima fordításra vagy üresen maradt
+   — a fordítás minősége pedig akkor is romolhatott, ha átfért, mert a modell
+   figyelme megoszlott. Mostantól a fordítás MINDIG a tiszta SYS_TR-en fut,
+   a szópárak pedig külön menetben készülnek, és a prompt megkapja a KÉSZ
+   magyar fordítást is — így a párok ahhoz a szöveghez horgonyzódnak, ami a
+   képernyőn van (a régi pótló újrafordíttatott, és a friss magyart eldobta:
+   a párok másik fordításhoz készültek, mint amit a felhasználó látott). */
+const SYS_PAIRS='You receive numbered items, each an English sentence from an audiobook and '+
+ 'its existing Hungarian translation, separated by " ||| ". The translation is FIXED - never '+
+ 'change, improve or comment on it. For EACH item pick 3-5 content words from the English that '+
+ 'carry meaning (nouns first, then verbs, then adjectives; never articles, auxiliaries or '+
+ 'prepositions). For each picked word give: the surface form as heard, its dictionary form '+
+ '(lemma), its part of speech as one of n/v/adj/adv/pn (pn = proper name), the Hungarian word '+
+ 'or phrase that renders it IN THE GIVEN TRANSLATION (copy the exact span where possible), and '+
+ 'the English word inserted into the given Hungarian sentence in place of that Hungarian word, '+
+ 'correctly suffixed Hungarian-style with a hyphen (e.g. "dream-eket", "script-et", '+
+ '"reality-t"). Additionally, if the sentence contains a SHORT self-contained English clause '+
+ 'of 3 to 6 words that works as a ready-made phrase on its own (e.g. "that is the whole '+
+ 'point", "it does not have to be that"), list at most two of them as pairs of the English '+
+ 'clause and the exact span of the given Hungarian translation that renders it. Skip this if '+
+ 'there is no such clause. Return ONLY a JSON array, one object per input item: '+
+ '{"w":[["surface","lemma","pos","hungarian","suffixed"],...],'+
+ '"c":[["english clause","magyar szakasz"],...]}. No markdown fence, no commentary.';
 
-async function llmRich(lines,eng){
+/* items: [{en, hu}] → [{w:[...], c:[...]}] */
+async function llmPairs(items,eng){
   const e=eng||CFG.tr;
-  const user=lines.map((l,i)=>(i+1)+'. '+l).join('\n');
-  const raw=(e==='oai'?await oaiCall(SYS_TR_W,user,2800):await claudeCall(SYS_TR_W,user,2800))
+  const user=items.map((it,i)=>(i+1)+'. '+it.en+' ||| '+(it.hu||'')).join('\n');
+  const raw=(e==='oai'?await oaiCall(SYS_PAIRS,user,2400):await claudeCall(SYS_PAIRS,user,2400))
     .replace(/```json|```/g,'').trim();
   const arr=JSON.parse(raw.slice(raw.indexOf('['),raw.lastIndexOf(']')+1));
-  if(!Array.isArray(arr)||arr.length!==lines.length) throw new Error('nem illeszkedő válasz');
+  if(!Array.isArray(arr)||arr.length!==items.length) throw new Error('nem illeszkedő válasz');
   return arr.map(x=>{
-    if(typeof x==='string') return {hu:x.trim(),w:[]};
+    if(!x||typeof x!=='object') return {w:[],c:[]};
     const w=Array.isArray(x.w)?x.w.filter(r=>Array.isArray(r)&&r.length>=5).slice(0,6):[];
     const c=Array.isArray(x.c)?x.c.filter(r=>Array.isArray(r)&&r.length>=2).slice(0,2):[];
-    return {hu:String(x.hu||'').trim(),
+    return {
       w:w.map(r=>({en:String(r[0]||''),lemma:String(r[1]||'').toLowerCase(),
         pos:String(r[2]||'other'),hu:String(r[3]||''),szo:String(r[4]||'')}))
         .filter(o=>o.en&&o.lemma&&o.hu&&o.szo),
@@ -1875,24 +1887,10 @@ async function trBatch(lines){
   if(todo.length){
     let got=null;
     if(CFG.tr!=='free'){
-      /* szópárok csak LLM-motorral és csak bekapcsolva: a DeepL és az ingyenes
-         motor nem tud ilyet adni, tehát ott a tanuló mód sem elérhető */
-      if(CFG.pairs){
-        try{
-          const rich=await llmRich(todo);
-          got=rich.map(r=>r.hu);
-          todo.forEach((l,i)=>{
-            if(!rich[i]) return;
-            if(rich[i].w.length) pcache[l]=rich[i].w;
-            if(rich[i].c&&rich[i].c.length) ccache[l]=rich[i].c;
-          });
-        }catch(e){ log('fordító+szópárok ('+CFG.tr+'):',e);
-          try{ got=await llmLines(todo) }
-          catch(e2){ log('fordító ('+CFG.tr+'):',e2); return lines.map(l=>cache[l]||'') } }
-      }else{
-        try{ got=await llmLines(todo) }
-        catch(e){ log('fordító ('+CFG.tr+'):',e); return lines.map(l=>cache[l]||'') }
-      }
+      /* v52: a fordítás MINDIG a tiszta SYS_TR-en fut — a szópárok külön
+         menetben készülnek (fillPairs), a kész magyarhoz horgonyozva */
+      try{ got=await llmLines(todo) }
+      catch(e){ log('fordító ('+CFG.tr+'):',e); return lines.map(l=>cache[l]||'') }
     }else{
       try{ got=await gtxLines(todo) }
       catch(e){
@@ -1930,15 +1928,17 @@ async function trOne(line,eng,wantPairs){
     if(!hu) throw new Error('a fordító nem adott választ');
     return {hu:hu};
   }
-  if(wantPairs){
-    try{
-      const r=await llmRich([line],eng);
-      if(r[0]&&r[0].hu) return r[0];
-    }catch(e){ log('újrafordítás szópárokkal ('+eng+'):',e) }
-  }
   const g=await llmLines([line],eng);
   if(!g[0]) throw new Error('a fordító nem adott választ');
-  return {hu:g[0]};
+  const out={hu:g[0]};
+  /* v52: a párok a FRISS fordításhoz készülnek, külön kéréssel */
+  if(wantPairs){
+    try{
+      const r=await llmPairs([{en:line,hu:out.hu}],eng);
+      if(r[0]){ out.w=r[0].w; out.c=r[0].c }
+    }catch(e){ log('szópárok az újrafordításhoz ('+eng+'):',e) }
+  }
+  return out;
 }
 /* A tagolás miatt egy magyar mondat 3-4 buborék is lehet, a fordítás viszont a
    TELJES mondatra készül (`huKey`). Az újrafordítás egysége ezért a mondat, nem a
@@ -2034,6 +2034,12 @@ async function fillHu(list,onStep,stopFn){
     if(!s.pairs&&pcache[k]) s.pairs=pcache[k];
     if(!s.cls&&ccache[k]) s.cls=ccache[k];
   }
+  /* v52: bekapcsolt szópároknál a párok a fordítás UTÁN, külön (könnyebb)
+     kéréssel készülnek, a kész magyarhoz horgonyozva */
+  if(CFG.pairs&&CFG.tr!=='free'&&CFG.tr!=='deepl'){
+    try{ await fillPairs(list,null,stopFn) }
+    catch(e){ log('szópárok a fordítás után:',e) }
+  }
   return n;
 }
 
@@ -2041,10 +2047,14 @@ async function fillHu(list,onStep,stopFn){
    írjuk át (az kész és jó), csak a párokat és a tagmondatokat vesszük át. Így a
    tanuló mód az első naptól teljes hallgatási előzményre épülhet. */
 async function fillPairs(list,onStep,stopFn){
+  /* v52: a szópár-menet a KÉSZ magyar fordítással együtt küldi az angolt
+     (SYS_PAIRS) — a párok ahhoz a szöveghez horgonyzódnak, ami a képernyőn
+     van, nem egy eldobott újrafordításhoz */
   const keys=[], seen={}, byKey={};
   for(const s of list){
     const k=huKey(s);
     if(!s.hu||s.pairs) continue;
+    if(pcache[k]){ s.pairs=pcache[k]; if(!s.cls&&ccache[k]) s.cls=ccache[k]; continue }
     if(!seen[k]){ seen[k]=1; keys.push(k); byKey[k]=[] }
     byKey[k].push(s);
   }
@@ -2053,7 +2063,8 @@ async function fillPairs(list,onStep,stopFn){
     if(stopFn&&stopFn()) break;
     const batch=keys.slice(i,i+10);
     try{
-      const rich=await llmRich(batch);
+      const items=batch.map(k=>({en:k,hu:cache[k]||(byKey[k][0]&&byKey[k][0].hu)||''}));
+      const rich=await llmPairs(items);
       batch.forEach((k,j)=>{
         const r=rich[j]; if(!r) return;
         for(const s of byKey[k]){
@@ -2218,6 +2229,113 @@ function nextGap(done,from,to){
   for(const iv of done){ if(iv[1]<=t+1) continue; if(iv[0]<=t+1){ t=iv[1]; continue } return [t,Math.min(to,iv[0])] }
   return t<to-1?[t,to]:null;
 }
+/* ======== v52: DUPLIKÁTUM-MARADVÁNYOK TISZTÍTÁSA ========
+   A mérés (pilot fixture, 170 töredék) kimutatta: a második átfutás részben
+   ismétlődő szöveget hoz vissza, amit a mergeSen szövegAZONOS szűrője nem fog
+   meg, mert máshol van tördelve. A képernyőn látott összefolyó szöveg
+   („their game. their game We understand…", „listeners. listeners.") ebből
+   keletkezett, és a v51-es összefűzés ezeket ragasztotta óriás egységekké.
+   Három determinisztikus, a szövegből bizonyítható szabály:
+
+   1. TÖREDÉKEN BELÜL: ha egy futam kétszer áll egymás után, ÉS az első példány
+      mondatvégi írásjellel zárul („X. X"), az a szófolyam-újraépítés lenyomata
+      → a második példányt töröljük. A mondatvégi írásjel feltétele VÉDI a
+      valódi ismétlést: a dalszöveg („and these, and these") vesszős, marad.
+      Egyszavas ismétlést csak hosszú (>=5 betűs) szónál bántunk („listeners.
+      listeners." igen, „No. No." nem).
+   2. SZOMSZÉDOK KÖZT: ha B első L szava megegyezik A utolsó L szavával, a
+      második átfutás ismétlése → B elejéről levágjuk (L>=4 feltétel nélkül;
+      L=2..3 csak időátfedésnél). Ha A vége írásjeltelen, de az ismételt darab
+      írásjeles, A örökli az írásjelet.
+   3. HATÁRON ÁTLÓGÓ: A vége + B eleje EGYÜTT ismétel egy A-ban már meglévő
+      futamot („…basis. to the City" + „Council members on a need-to-know
+      basis…") → mindkét oldalról levágjuk.
+
+   Fordítást csak azon a töredéken dobunk el, amelynek a szövege változott. */
+const dedupNrm=t=>String(t).toLowerCase().replace(/[^a-z0-9áéíóöőúüű']/g,'');
+function dedupText(en){
+  const tok=String(en||'').split(/\s+/).filter(Boolean);
+  const nw=tok.map(dedupNrm);
+  let valt=false;
+  for(let i=0;i<tok.length;i++){
+    let l=Math.min(12,Math.floor((tok.length-i)/2));
+    while(l>=1){
+      const ok=l>=2||(nw[i]&&nw[i].length>=5);
+      if(ok&&nw.slice(i,i+l).join(' ')===nw.slice(i+l,i+2*l).join(' ')&&
+         /[.!?…]["»”')]?$/.test(tok[i+l-1])){
+        tok.splice(i+l,l); nw.splice(i+l,l);
+        valt=true;
+        l=Math.min(12,Math.floor((tok.length-i)/2));   /* újra ugyanitt */
+      }else l--;
+    }
+  }
+  return valt?tok.join(' '):en;
+}
+function dedupPair(aEn,bEn,atfed){
+  const at=String(aEn||'').split(/\s+/).filter(Boolean);
+  const bt=String(bEn||'').split(/\s+/).filter(Boolean);
+  const an=at.map(dedupNrm), bn=bt.map(dedupNrm);
+  const max=Math.min(an.length,bn.length);
+  for(let l=max;l>=2;l--){
+    if(an.slice(-l).join(' ')!==bn.slice(0,l).join(' ')) continue;
+    if(l<4&&!atfed) return null;
+    const aLast=at[at.length-1], bLast=bt[l-1];
+    let ujA=null;
+    if(!/[.!?…,;:]$/.test(aLast)&&/[.!?…,;:]["»”')]?$/.test(bLast)){
+      at[at.length-1]=aLast+bLast.match(/[.!?…,;:]["»”')]?$/)[0];
+      ujA=at.join(' ');
+    }
+    return {a:ujA,b:bt.slice(l).join(' ')};
+  }
+  return null;
+}
+function dedupStraddle(aEn,bEn){
+  const at=String(aEn||'').split(/\s+/).filter(Boolean);
+  const bt=String(bEn||'').split(/\s+/).filter(Boolean);
+  const an=at.map(dedupNrm), bn=bt.map(dedupNrm);
+  let best=null;
+  for(let sa=1;sa<=Math.min(10,at.length-1);sa++){
+    for(let pb=Math.min(12,bt.length);pb>=1;pb--){
+      if(sa+pb<4) break;
+      const run=an.slice(at.length-sa).concat(bn.slice(0,pb));
+      const hay=an.slice(0,at.length-sa);
+      let van=false;
+      for(let p=0;p+run.length<=hay.length;p++){
+        let egyezik=true;
+        for(let q=0;q<run.length;q++) if(hay[p+q]!==run[q]){ egyezik=false; break }
+        if(egyezik){ van=true; break }
+      }
+      if(van&&(!best||sa+pb>best.sa+best.pb)) best={sa,pb};
+    }
+  }
+  if(!best) return null;
+  return {a:at.slice(0,at.length-best.sa).join(' '),b:bt.slice(best.pb).join(' ')};
+}
+/* rec.sen tisztítása; a beavatkozások számát adja vissza */
+function dedupSen(rec){
+  const S=(rec&&rec.sen)||[];
+  let n=0;
+  for(const s of S){
+    const d=dedupText(s.en);
+    if(d!==s.en){ s.en=d; s.hu=''; delete s.full; delete s.pairs; delete s.cls; n++ }
+  }
+  for(let i=0;i<S.length-1;i++){
+    const A=S[i], B=S[i+1];
+    const atfed=Math.min(A.b,B.b)-Math.max(A.a,B.a)>0.05;
+    let r=dedupPair(A.en,B.en,atfed);
+    if(!r) r=dedupStraddle(A.en,B.en);
+    if(!r) continue;
+    n++;
+    if(r.a!=null&&r.a!==A.en){ A.en=r.a; A.hu=''; delete A.full }
+    B.en=r.b; B.hu=''; delete B.full; delete B.pairs; delete B.cls;
+    if(!B.en.trim()){                        /* kiürült: idejét A kapja meg */
+      A.b=Math.max(A.b,B.b);
+      S.splice(i+1,1); i--;
+    }
+  }
+  return n;
+}
+
 /* ======== v49: az IDŐREND rendbetétele ========
    A felismerő rendszeresen túlnyújtja a mondat végét a következő kezdetén (a
    felhasználó felvételében 170 mondatból 119 fedte az előzőt), és ez addig csak
@@ -2289,9 +2407,27 @@ function deadSen(rec){
    Folytatásnak azt tekintjük, ha a töredék NEM mondatvégre végződik, és a következő
    2 másodpercen belül kezdődik. `MAXF` felett nem fűzünk (v46: az írásjel nélküli
    szalagból ne legyen irdatlan egység). */
+/* v52: a régi szabály egyetlen jele a hiányzó mondatvégi írásjel volt, és a
+   szünet-szűrő a normSen után halott (a mérésben 52/52 pár átment rajta) —
+   mért pontossága 53% volt, duplikátumokat és külön mondatokat is fűzött.
+   Az új szabály három feltétele (mért pontosság: 93%):
+   1. duplikátum-őr: ha B eleje megismétli A végét, az átfedés-maradvány,
+      nem folytatás — az a dedupSen dolga;
+   2. pozitív jel kell: B kisbetűvel kezdődik, VAGY A nyilvánvalóan csonkán
+      végződik (vessző/kötőjel, névelő–kötőszó–elöljáró–segédige) — a pusztán
+      hiányzó írásjel nem elég, a felismerő a töredékek 31%-át zárja írásjel
+      nélkül úgy, hogy a mondat valójában véget ért;
+   3. a szünet-szűrő az EREDETI időkkel fut (a mergeSen a stitch UTÁN rendez). */
+const CSONKA_VEG=/\b(a|an|the|and|or|but|of|to|in|on|at|for|with|that|which|who|whom|whose|as|is|are|was|were|be|been|being|has|have|had|will|would|shall|can|could|should|may|might|must|by|from|into|onto|about|than|so|because|while|when|if|his|her|their|its|my|our|your|this|these|those)$/i;
 function contd(a,b){
   if(!a||!b) return false;
-  if(/[.!?…]["»”')]?$/.test(String(a.en||'').trim())) return false;
+  const ae=String(a.en||'').trim(), be=String(b.en||'').trim();
+  if(/[.!?…]["»”')]?$/.test(ae)) return false;
+  const an=ae.split(/\s+/).map(dedupNrm), bn=be.split(/\s+/).map(dedupNrm);
+  const mx=Math.min(an.length,bn.length);
+  for(let l=mx;l>=2;l--)
+    if(an.slice(-l).join(' ')===bn.slice(0,l).join(' ')) return false;
+  if(!/^[a-z]/.test(be)&&!/[,;:–—-]$/.test(ae)&&!CSONKA_VEG.test(ae)) return false;
   return (b.a-a.b)<2.0;
 }
 function stitchGroups(rec){
@@ -2354,14 +2490,22 @@ function mergeSen(rec,sen){
   }
   const added=out.length-rec.sen.length;
   rec.sen=out;
-  /* v49: minden beolvasztás után rendbe tesszük az időrendet — enélkül az újonnan
-     megtalált mondat egy meglévővel egy időben indulhat, és soha nem kerül sorra */
-  const igazitva=normSen(rec);
-  if(igazitva) log('időrend: '+igazitva+' igazítás a beolvasztás után');
+  /* v52: a sorrend megfordult — tisztítás → összefűzés → időrend.
+     1. a részleges duplikátum még az összefűzés ELŐTT kikerül, különben a
+        stitch óriás, összekevert egységekké ragasztja őket;
+     2. az összefűzés az EREDETI felismerői időkkel fut — a normSen a b-ket
+        a következő kezdetéig húzza, ami után a <2 s szünet-szűrő halott volt;
+     3. az időrend a megjelenítéshez, mint eddig. */
+  const tiszt=dedupSen(rec);
+  if(tiszt) log('tisztítás: '+tiszt+' duplikátum-maradvány eltávolítva');
   /* v51: a mondat közepén elvágott töredékek EGY fordítási egységet kapnak — ez a
      fordítás ELŐTT kell megtörténnie, különben fél mondatokat fordítunk */
   const fuzve=stitchSen(rec,false);
   if(fuzve) log('összefűzés: '+fuzve+' töredék kapott teljes mondatot fordítási egységként');
+  /* v49: minden beolvasztás után rendbe tesszük az időrendet — enélkül az újonnan
+     megtalált mondat egy meglévővel egy időben indulhat, és soha nem kerül sorra */
+  const igazitva=normSen(rec);
+  if(igazitva) log('időrend: '+igazitva+' igazítás a beolvasztás után');
   return added;
 }
 const norm=s=>s.toLowerCase().replace(/[^a-z0-9áéíóöőúüű ]/g,'').replace(/\s+/g,' ').trim();
@@ -2489,6 +2633,11 @@ async function runPass(rec,M,ranges,cim,minLen){
           }
         }
         if(!d) continue;
+        /* v52: írásjelezés a nyers válaszon, még a tagolás előtt */
+        if(llmOk()){
+          const np=await punctAsr(d);
+          if(np) log('írásjelezés (átfutás): '+np+' szó jelölve a tagolás előtt');
+        }
         const cap=Math.min(piece.t1,rec.dur||piece.t1);
         let sen=toSentences(d,piece.t0).filter(x=>x.b>x.a).map(x=>{
           x.b=Math.min(x.b,cap);
@@ -2620,6 +2769,44 @@ const SYS_PUNCT='You restore punctuation in an English transcript produced by sp
  'sentence; (4) keep existing punctuation unless it is clearly wrong. Output only the '+
  'corrected transcript, no commentary.';
 const llmCall=(sys,user,mx)=>(CFG.tr==='oai'&&CFG.oaiKey)?oaiCall(sys,user,mx):claudeCall(sys,user,mx);
+/* van-e LLM, amivel írásjelezni lehet? */
+const llmOk=()=>CFG.tr==='oai'?!!CFG.oaiKey:CFG.tr==='claude'?!!CFG.clKey:false;
+/* ======== v52: ÍRÁSJELEZÉS A LÁNC ELEJÉN ========
+   Minden későbbi szabály — tagolás, összefűzés, magyar buborékok — írásjelekre
+   épül. Ha a felismerő nem tesz ki írásjelet (dal, zene alatti beszéd), a lánc
+   többi része csak tippelni tud, és a fordítás is fél mondatokat kap. Ezért az
+   írásjelezés nem utólagos javító, hanem a lánc ELEJÉN fut: közvetlenül a
+   felismerő nyers válaszán, MÉG a tagolás és a fordítás előtt. Így a
+   splitSentences valódi mondatokat vág, a buborék = mondat, és a fordító eleve
+   teljes mondatokat kap — nem kell semmit utólag újrafordítani.
+
+   Csak akkor fut, ha (1) van LLM-kulcs, (2) vannak szó-időbélyegek, és (3) a
+   needPunct hiányt jelez (25 szónál ritkább mondatvég) — normál podcastnál
+   tehát SOSEM hív API-t, csak a problémás (zenés/dalos) szeleteknél. A v50-es
+   repunct ellenőrzése változatlanul él: ha a válasz nem ugyanazokat a szavakat
+   adja vissza, az egészet eldobjuk, és marad a nyers szöveg. */
+async function punctAsr(d){
+  try{
+    const words=(d&&d.words)||[];
+    if(!words.length) return 0;
+    const idx=[], txts=[];
+    words.forEach((w,i)=>{
+      const t=String(w.word!=null?w.word:(w.text!=null?w.text:'')).trim();
+      if(t){ idx.push(i); txts.push(t) }
+    });
+    if(txts.length<20||!needPunct(txts)) return 0;
+    const got=await repunct(txts);
+    if(got.length!==txts.length) return 0;
+    let n=0;
+    got.forEach((t,j)=>{
+      if(t===txts[j]) return;
+      const w=words[idx[j]];
+      if(w.word!=null) w.word=t; else w.text=t;
+      n++;
+    });
+    return n;
+  }catch(e){ log('írásjelezés a felismerés után:',e); return 0 }
+}
 /* a szófolyam szakaszai (nagy szünetnél vágva) — az újraépítés és az írásjelezés is
    ugyanezeken a szakaszokon dolgozik */
 function senRuns(rec){
@@ -2675,6 +2862,9 @@ async function stitchFix(rec){
   JOB.on=true; JOB.stop=false;
   progShow(true); $('progHide').classList.add('hid'); $('progStop').textContent='szüneteltetés';
   try{
+    /* v52: összefűzés előtt tisztítás — duplikátumot soha ne ragasszunk össze */
+    const tiszt=dedupSen(rec);
+    if(tiszt) log('összefűzés előtti tisztítás: '+tiszt+' duplikátum-maradvány');
     const n=stitchSen(rec,true);
     normSen(rec);
     const need=rec.sen.filter(x=>!x.hu);
@@ -2691,6 +2881,42 @@ async function stitchFix(rec){
     toast(gs.length+' szétvágott mondat összefűzve és újrafordítva',5000);
   }catch(e){
     log('összefűzés megállt:',e);
+    progSet(99,'megállt',String(e.message).slice(0,180));
+    $('progStop').textContent='újra'; $('progHide').classList.remove('hid');
+  }finally{
+    JOB.on=false; if(cacheDirty) saveCache(); await save(rec); drawLib();
+  }
+}
+/* v52: kézi duplikátum-tisztítás a már sérült felvételekre — lefuttatja a
+   dedupSen-t, újrafűzi az érintetteket, és CSAK azokat fordítja újra,
+   amelyeknek a szövege változott. A többi fordításhoz nem nyúl. */
+async function cleanDupes(rec){
+  if(!rec||!(rec.sen||[]).length) return toast('nincs mit tisztítani');
+  if(JOB.on||RT) return toast('már fut egy feldolgozás');
+  JOB.on=true; JOB.stop=false;
+  progShow(true); $('progHide').classList.add('hid'); $('progStop').textContent='szüneteltetés';
+  try{
+    const n=dedupSen(rec);
+    if(!n){
+      progShow(false); JOB.on=false;
+      return toast('nem találtam duplikátum-maradványt',4000);
+    }
+    stitchSen(rec,false);
+    normSen(rec);
+    const need=rec.sen.filter(x=>!x.hu);
+    progSet(5,'tisztítás',n+' beavatkozás · '+need.length+' mondat újrafordítása');
+    await fillHu(need,(k,t)=>progSet(5+k/Math.max(1,t)*90,'tisztítás',k+' / '+t),
+      ()=>JOB.stop);
+    if(cacheDirty) saveCache();
+    await save(rec);
+    CUR=senAt(A.currentTime||0);
+    huBuild(); renderKara(false); layoutSplit(); pgReset(); renderHu(true); paintCur(true);
+    progSet(100,'kész',n+' duplikátum-maradvány eltávolítva');
+    $('progStop').textContent='újra'; $('progHide').classList.remove('hid');
+    log('duplikátum-tisztítás: '+n+' beavatkozás, '+need.length+' újrafordítás');
+    toast(n+' duplikátum-maradvány eltávolítva és újrafordítva',5000);
+  }catch(e){
+    log('tisztítás megállt:',e);
     progSet(99,'megállt',String(e.message).slice(0,180));
     $('progStop').textContent='újra'; $('progHide').classList.remove('hid');
   }finally{
@@ -2883,6 +3109,12 @@ async function runJob(rec,M,from,to,opts){
       }
       if(JOB.stop) break;
       if(err) throw err;
+      /* v52: írásjelezés a nyers válaszon, MÉG a tagolás előtt — csak akkor
+         hív API-t, ha a szeletből tényleg hiányoznak az írásjelek */
+      if(llmOk()){
+        const np=await punctAsr(d);
+        if(np) log('írásjelezés: '+np+' szó jelölve a tagolás előtt ('+fmtT(t0)+' → '+fmtT(t1)+')');
+      }
       let sen=toSentences(d,piece.t0);
       /* a felismerő időbélyege néha túllóg a szeleten; a lejátszó ilyenkor
          hibás mondatnál állna, ezért a szelet határára szorítjuk */
@@ -5209,6 +5441,10 @@ $('pMore').onclick=()=>{
       const db=gs.reduce((n,g)=>n+(g.i1-g.i0+1),0);
       return {t:'mondatok összefűzése a fordításhoz'+(db?' ('+db+' töredék)':''),
         fn:()=>stitchFix(REC)} })(),
+    /* v52: a második átfutás részleges ismétlés-maradványait szedi ki
+       („their game. their game", vég-eleje és határon átlógó duplikátumok),
+       és csak az érintetteket fordítja újra */
+    {t:'duplikátumok tisztítása',fn:()=>cleanDupes(REC)},
     {t:'szöveg újraépítése (angol tagolás + magyar)',fn:()=>rebuildText(REC)},
     /* v50: ha a felismerő nem tett ki írásjelet, a tagolás sem tud mondatot találni —
        ez LLM-mel visszateszi az írásjeleket (a szavakhoz nem nyúl), aztán újraépít */
@@ -5923,11 +6159,12 @@ window.HG={txtAll,txtGet,txtPut,txtDel,medAll,medGet,medDel,openMedia,cut,runJob
   wordStream, rebuildSen, rebuildText, normSen, deadSen, senAt,
   senRuns, runsToSen, needPunct, repunct, punctRebuild, punctNorm,
   contd, stitchGroups, stitchSen, stitchFix,
+  dedupText, dedupPair, dedupStraddle, dedupSen, cleanDupes, punctAsr, llmOk,
   sheetProcess,
   get job(){return JOB},
   syncHuFlow, huBuild, renderKara,
   learnSet, weave, wReady, clReady, bankBump, ngrBump, bankStat, bankCredit, flashTick,
-  fillPairs, llmRich, qFillAll, qAdvance, sheetQueue, sheetAddTo, huAlign,
+  fillPairs, llmPairs, qFillAll, qAdvance, sheetQueue, sheetAddTo, huAlign,
   lists, listNew, listDel, listAdd, listRemove, listMove, listOf, listById,
   listResume, listNextId, inAnyList, commonName, ytId, ytStart, ytStop, ytLayout, addYt, ytTitle, isYtRec,
   parseYtTranscript, askPaste, feedParse, feedLoad, feedGrab, fdShow,

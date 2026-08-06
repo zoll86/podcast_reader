@@ -13,6 +13,19 @@ olvasás helyett hallgatás.
 
 ## Mit tud
 
+- **Tiszta fordítási lánc (v52)**: a tördelési és fordítási hibák mérésen alapuló
+  javítása. (1) A második átfutás részleges ismétlés-maradványait („their game.
+  their game We understand…") egy determinisztikus tisztító automatikusan kiszedi
+  a beolvasztáskor, és kézi menüpontként is elérhető a régebbi felvételekhez
+  (⋯ → szöveg → „duplikátumok tisztítása"). (2) A mondat-összefűzés szabálya
+  szigorodott: duplikátumot soha nem fűz, és pozitív jel kell hozzá — a mért
+  pontossága 53%-ról 93%-ra nőtt. (3) Az írásjelezés a lánc ELEJÉRE került:
+  ha egy szeletből hiányoznak az írásjelek (dal, zene alatti beszéd), az LLM
+  még a tagolás és a fordítás előtt visszateszi őket, így a buborék eleve mondat,
+  és a fordító eleve teljes mondatokat kap. (4) A fordítás és a tanuló mód
+  szópár-gyártása szétvált: a fordítás mindig a tiszta fordító-prompton fut, a
+  szópárak külön, könnyebb kéréssel készülnek, és a KÉSZ magyar fordításhoz
+  horgonyzódnak — nem egy eldobott újrafordításhoz
 - **Szöveg újraépítése (v47, v48)**: ha a felismerő rosszul tagolt — jellemzően dal vagy
   zene alatti beszéd, ahol egyetlen írásjel nélküli szalagot ad, és abból egy irdatlan
   buborék lesz összefolyó magyar szöveggel —, a ⋯ → szöveg menüben a „szöveg

@@ -1,3 +1,28 @@
+---
+
+# KIEGÉSZÍTÉS — v52 (a lenti dokumentum v51-es állapotot ír le)
+
+A v51-es ÁTADÓ által előírt mérés megtörtént (pilot fixture, 170 töredék, majd
+a friss 206 töredékes export). A lelet és a döntés:
+
+- **A fő bűnös a 4. gyanúsított volt**: a második átfutás részleges
+  ismétlés-maradványai (9 vég-eleje, 7 belső „X. X", 7 határon átlógó), amiket a
+  mergeSen szövegazonos szűrője nem fogott meg. A „pont+kisbetű" 14 belső
+  helyéből 11 ennek a lenyomata volt — a splitSentences szabálya (2. gyanúsított)
+  felmentve, változatlan.
+- **Az 1. gyanúsított (v51-es contd) mért pontossága 53% volt** — duplikátumokat
+  és külön mondatokat is fűzött. Az 5. gyanúsított részben igazolódott: a <2 s
+  szünet-szűrő a normSen után 52/52 párt átengedett.
+- **Javítás (v52):** dedupSen tisztító (automatikus a mergeSen-ben + kézi
+  menüpont); contd duplikátum-őrrel és kötelező pozitív jellel (mért pontosság
+  93%); a mergeSen sorrendje dedup → stitch → normSen (a szünet-szűrő az eredeti
+  időkkel fut). Emellett: írásjelezés a lánc ELEJÉN (punctAsr a nyers
+  felismerő-válaszon, csak ha a needPunct hiányt jelez); a fordítás és a
+  szópár-gyártás szétválasztva (SYS_TR mindig egyedül; SYS_PAIRS a kész
+  magyarral horgonyoz).
+- Ellenőrzés: mindkét fixture-ön 0 duplikátum-maradványos egység, 0 óriás
+  egység; a beépített kód round-trip mérése egyezik a fejlesztés közbenivel.
+
 # Átadó — Kétnyelvű hallgató (hangoskönyv karaoke)
 
 Ez a dokumentum azért készült, hogy egy új beszélgetésben azonnal folytatható legyen a
