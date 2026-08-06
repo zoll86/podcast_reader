@@ -1,5 +1,15 @@
 ---
 
+# KIEGÉSZÍTÉS — v53: BUBORÉK = MONDAT
+
+A v53 a mondatot tette fizikai egységgé: a rec.sen elemei mondatok (sentencize
+olvaszt és szétválaszt a szó-időbélyegek mentén), a huAlign blokk-faragása
+megszűnt (egy egység = egy magyar buborék), a breakLong/pushSen csak az
+írásjel nélküli szalagot töri (MAXF fölött, külön egységekre). Megnyitáskor a
+régi felvételek veszteség nélkül migrálódnak (a közös full-t hordozó darabok
+a full szöveggé olvadnak, a kész magyar átöröklődik). Részletek:
+VALTOZASOK_v53.md.
+
 # KIEGÉSZÍTÉS — v52 (a lenti dokumentum v51-es állapotot ír le)
 
 A v51-es ÁTADÓ által előírt mérés megtörtént (pilot fixture, 170 töredék, majd

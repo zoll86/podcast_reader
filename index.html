@@ -892,7 +892,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v52';
+const APP_VER='v53';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -1677,29 +1677,25 @@ function splitSentences(txt){
   if(rest) out.push({t:rest,s,e:txt.length});
   return out;
 }
-/* a hosszú, írásjel nélküli szakaszokat is fel kell törni, különben egy „mondat”
-   fél percig tart, és a karaoke elveszti az értelmét */
+/* v53: BUBORÉK = MONDAT. Mondaton belül nem tördelünk — sem a kijelzőn, sem a
+   fordítási kérésben. Az egyetlen kivétel a degenerált eset: az írásjel nélküli
+   szalag (dal, zene alatti beszéd), ahol NINCS mondathatár — MAXF szó fölött ott
+   muszáj vágni, különben egy „mondat” fél percig tart. Az így keletkező darabok
+   KÜLÖN egységek (nincs közös `f`): a v46 tanulsága, hogy a szalagból nem szabad
+   irdatlan közös fordítási egységet csinálni. Valódi, írásjeles mondat 60 szó
+   fölött gyakorlatilag nem létezik, tehát ez a vágás élő szövegben nem fut. */
 const MAXW=26, MAXF=60;
 function breakLong(sen){
   const out=[];
   for(const s of sen){
     const w=s.t.split(/\s+/);
-    if(w.length<=MAXW+8){ out.push(s); continue }
-    /* Az `f` a teljes eredeti mondat: a fordítás ebből készül, hogy a vesszőnél
-       elvágott töredék alatt ne legyen csonka a magyar. Dalszövegnél és zene alatti
-       beszédnél viszont a felismerő EGYETLEN írásjel nélküli szalagot ad, néha több
-       száz szót — abból egy irdatlan fordítási egység lett, egyetlen óriás buborékkal
-       és egy összefolyó magyar szöveggel. Ilyenkor a töredék marad az egység. */
-    const egesz=w.length<=MAXF;
+    if(w.length<=MAXF){ out.push(s); continue }
     let buf=[], acc=0;
     for(let i=0;i<w.length;i++){
       buf.push(w[i]); acc++;
       const soft=/[,;:—–)]$/.test(w[i]);
       if((soft&&acc>=14)||acc>=MAXW||i===w.length-1){
-        /* f: a teljes eredeti mondat — a fordítás ebből készül, nem a töredékből */
-        const o={t:buf.join(' ')};
-        if(egesz) o.f=s.t;
-        out.push(o); buf=[]; acc=0;
+        out.push({t:buf.join(' ')}); buf=[]; acc=0;
       }
     }
   }
@@ -1740,14 +1736,15 @@ function toSentences(d,base){
 }
 function pushSen(arr,s){
   const w=s.en.split(/\s+/).length;
-  if(w>MAXW+8&&s.w){          /* szó-időbélyeggel a hosszú részt pontosan törjük */
+  /* v53: valódi mondat EGYBEN marad, akármilyen hosszú — csak az írásjel
+     nélküli szalag (>MAXF) törik, és a darabjai KÜLÖN egységek */
+  if(w>MAXF&&s.w){
     const parts=breakLong([{t:s.en}]); let k=0;
     for(const p of parts){
       const n=p.t.split(/\s+/).length;
       const ws=s.w.slice(k,k+n); k+=n;
       if(!ws.length) continue;
-      arr.push({a:+ws[0].toFixed(2), b:+(k<s.w.length?s.w[k]:s.b).toFixed(2), en:p.t, w:ws,
-                full:s.en});
+      arr.push({a:+ws[0].toFixed(2), b:+(k<s.w.length?s.w[k]:s.b).toFixed(2), en:p.t, w:ws});
     }
     return;
   }
@@ -2455,6 +2452,102 @@ function stitchGroups(rec){
   }
   return out.filter(g=>g.i1>g.i0);
 }
+/* ======== v53: MONDAT = TÖREDÉK = BUBORÉK ========
+   Az angol buborékban és az alatta lévő magyarban MINDIG ugyanaz a mondat áll,
+   és a fordítási kérésbe is mondat megy — vágni csak mondathatáron szabad.
+   Ehhez a mondatot nem elég közös `full`-lal megjelölni (akkor az angol sáv
+   továbbra is fél mondatokat lapozna): a rec.sen elemeinek KELL mondatnak
+   lenniük. Két művelet, mindkettő a szó-időbélyegek mentén:
+
+   A) ÖSSZEOLVASZTÁS: a felismerő által szétvágott mondat töredékei (contd-
+      futamok) fizikailag EGY töredékké olvadnak. A közös `full`-t hordozó
+      szomszédok (régi felvételek breakLong-darabjai) VESZTESÉG NÉLKÜL olvadnak
+      össze: a szövegük együtt pont a `full`, ami eddig is a fordítási kulcs
+      volt — a kész magyar egy betű újrafordítás nélkül átöröklődik.
+   B) SZÉTVÁLASZTÁS: a több mondatot hordozó töredék mondatonként szétválik;
+      az időket a szó-időbélyegek adják, ha nincsenek, karakterarányosan
+      becslünk.
+
+   `force` nélkül csak a fordítás nélküli (friss) töredékekhez nyúlunk — kész
+   magyar szöveg nem vész el kérdés nélkül. */
+function splitFrag(s){
+  const en=String(s.en||'').trim();
+  const parts=splitSentences(en);
+  if(parts.length<=1) return null;
+  const toks=en.split(/\s+/).filter(Boolean);
+  const total=parts.reduce((n,p)=>n+p.t.trim().split(/\s+/).filter(Boolean).length,0);
+  const W=(Array.isArray(s.w)&&s.w.length===toks.length&&total===toks.length)?s.w:null;
+  const span=Math.max(0.05,(+s.b||0)-(+s.a||0));
+  const out=[]; let k=0, chars=0; const L=en.length||1;
+  parts.forEach((p,pi)=>{
+    const t=p.t.trim(); if(!t) return;
+    const n=t.split(/\s+/).filter(Boolean).length;
+    let a,b,ws=null;
+    if(W){ ws=W.slice(k,k+n); a=ws[0]; b=(k+n<W.length?W[k+n]:s.b) }
+    else{
+      a=s.a+span*(chars/L);
+      b=(pi===parts.length-1)?s.b:s.a+span*Math.min(1,(chars+t.length)/L);
+    }
+    const o={a:+(+a).toFixed(2),b:+(+b).toFixed(2),en:t};
+    if(ws) o.w=ws;
+    out.push(o); k+=n; chars+=t.length+1;
+  });
+  return out.length>1?out:null;
+}
+function sentencize(rec,force){
+  const S=(rec&&rec.sen)||[];
+  if(!S.length) return 0;
+  let n=0;
+  const wOf=x=>{
+    const tk=String(x.en||'').trim().split(/\s+/).filter(Boolean);
+    return (Array.isArray(x.w)&&x.w.length===tk.length)?x.w:null;
+  };
+  const olvaszt=(i0,i1,en,hu)=>{
+    const tag=S.slice(i0,i1+1);
+    let w=[], okW=true;
+    for(const x of tag){ const xw=wOf(x); if(xw) w=w.concat(xw); else { okW=false; break } }
+    const uj={a:tag[0].a,b:tag[tag.length-1].b,en:en,hu:hu||''};
+    if(okW&&w.length===en.trim().split(/\s+/).filter(Boolean).length) uj.w=w;
+    if(hu){ if(tag[0].pairs) uj.pairs=tag[0].pairs; if(tag[0].cls) uj.cls=tag[0].cls;
+            if(tag[0].hu0!=null) uj.hu0=tag[0].hu0; if(tag[0].tre) uj.tre=tag[0].tre }
+    S.splice(i0,i1-i0+1,uj);
+    return tag.length;
+  };
+  /* A/1) közös `full`-t hordozó szomszédok — VESZTESÉG NÉLKÜL, fordítástól
+     függetlenül: az egyesített szöveg a `full`, a kulcs nem változik */
+  for(let i=0;i<S.length;i++){
+    const f=S[i].full;
+    if(!f) continue;
+    let j=i; while(j+1<S.length&&S[j+1].full===f) j++;
+    const egyben=S.slice(i,j+1).map(x=>String(x.en||'').trim()).join(' ');
+    if(j>i&&dedupNrm(egyben.replace(/\s+/g,''))===dedupNrm(String(f).replace(/\s+/g,''))){
+      n+=olvaszt(i,j,String(f),S[i].hu||cache[f]||'');
+    }else{
+      /* csonka futam (nem adja ki a teljes mondatot): marad, a huKey kezeli */
+      i=j;
+    }
+  }
+  /* A/2) a felismerő által szétvágott mondat (contd-futamok) */
+  const gs=stitchGroups(rec);
+  for(let gi=gs.length-1;gi>=0;gi--){
+    const g=gs[gi], tag=S.slice(g.i0,g.i1+1);
+    if(!force&&tag.some(x=>x.hu)) continue;
+    n+=olvaszt(g.i0,g.i1,g.txt,'');
+  }
+  /* B) több mondat egy töredékben → mondatonként szét */
+  for(let i=0;i<S.length;i++){
+    const s=S[i];
+    if(!force&&s.hu) continue;
+    const parts=splitFrag(s);
+    if(!parts){ if(s.full&&(force||!s.hu)) delete s.full; continue }
+    S.splice(i,1,...parts);
+    n+=parts.length; i+=parts.length-1;
+  }
+  /* a full innentől csak a régi, még nem migrált (fordított, csonka) futamokon él */
+  for(const s of S){ if(s.full&&(force||!s.hu)) delete s.full }
+  return n;
+}
+
 /* `force` nélkül csak azokat fűzi össze, amelyeknek MÉG NINCS fordítása (a friss
    felismerésnél ez az összes) — így soha nem dobunk el kész magyar szöveget úgy,
    hogy ne kérnénk rá újat. */
@@ -2498,10 +2591,11 @@ function mergeSen(rec,sen){
      3. az időrend a megjelenítéshez, mint eddig. */
   const tiszt=dedupSen(rec);
   if(tiszt) log('tisztítás: '+tiszt+' duplikátum-maradvány eltávolítva');
-  /* v51: a mondat közepén elvágott töredékek EGY fordítási egységet kapnak — ez a
-     fordítás ELŐTT kell megtörténnie, különben fél mondatokat fordítunk */
-  const fuzve=stitchSen(rec,false);
-  if(fuzve) log('összefűzés: '+fuzve+' töredék kapott teljes mondatot fordítási egységként');
+  /* v53: mondat = töredék = buborék — a szétvágott mondat egyé olvad, a több
+     mondatot hordozó töredék mondatonként szétválik. A fordítás így eleve
+     TELJES mondatot kap, és a két sáv buboréka mindig ugyanaz a mondat. */
+  const fuzve=sentencize(rec,false);
+  if(fuzve) log('mondatokra rendezés: '+fuzve+' töredék igazítva mondathatárra');
   /* v49: minden beolvasztás után rendbe tesszük az időrendet — enélkül az újonnan
      megtalált mondat egy meglévővel egy időben indulhat, és soha nem kerül sorra */
   const igazitva=normSen(rec);
@@ -2851,36 +2945,40 @@ async function punctRebuild(rec,onProg){
   return {sen:runsToSen(runs),szakasz:kell.length};
 }
 async function stitchFix(rec){
-  if(!rec||!(rec.sen||[]).length) return toast('nincs mit összefűzni');
+  if(!rec||!(rec.sen||[]).length) return toast('nincs mit rendezni');
   if(JOB.on||RT) return toast('már fut egy feldolgozás');
+  /* v53: teljes mondat-rendezés — szétvágott mondat egyé olvad, több mondat
+     szétválik; az érintettek újrafordítása. A veszteség nélküli (közös full-os)
+     összeolvasztáshoz nem kell újrafordítás. */
   const gs=stitchGroups(rec);
   const db=gs.reduce((n,g)=>n+(g.i1-g.i0+1),0);
-  if(!db) return toast('minden mondat egyben van — nincs mit összefűzni',4000);
-  if(!confirm('Ebben a felvételben '+gs.length+' mondatot vágott szét a felismerő ('+
-    db+' töredék), ezért fél mondatok lettek lefordítva. Összefűzöm őket egy fordítási '+
-    'egységgé, és CSAK ezeket fordítom újra. A többi fordításhoz nem nyúlok.')) return;
+  let tobb=0;
+  for(const x of rec.sen) if(splitSentences(String(x.en||'').trim()).length>1) tobb++;
+  if(!db&&!tobb) return toast('minden buborék pontosan egy mondat — nincs mit rendezni',4000);
+  if(!confirm('Mondatokra rendezés: '+(db?gs.length+' szétvágott mondatot összeolvasztok ('+db+
+    ' töredék)':'')+(db&&tobb?', ':'')+(tobb?tobb+' több mondatot hordozó buborékot szétválasztok':'')+
+    '. Az érintett mondatokat újrafordítom, a többi fordításhoz nem nyúlok.')) return;
   JOB.on=true; JOB.stop=false;
   progShow(true); $('progHide').classList.add('hid'); $('progStop').textContent='szüneteltetés';
   try{
-    /* v52: összefűzés előtt tisztítás — duplikátumot soha ne ragasszunk össze */
     const tiszt=dedupSen(rec);
-    if(tiszt) log('összefűzés előtti tisztítás: '+tiszt+' duplikátum-maradvány');
-    const n=stitchSen(rec,true);
+    if(tiszt) log('rendezés előtti tisztítás: '+tiszt+' duplikátum-maradvány');
+    const n=sentencize(rec,true);
     normSen(rec);
     const need=rec.sen.filter(x=>!x.hu);
-    progSet(5,'összefűzés',need.length+' mondat fordítása');
-    await fillHu(need,(k,t)=>progSet(5+k/Math.max(1,t)*90,'összefűzés',k+' / '+t),
+    progSet(5,'mondat-rendezés',need.length+' mondat fordítása');
+    await fillHu(need,(k,t)=>progSet(5+k/Math.max(1,t)*90,'mondat-rendezés',k+' / '+t),
       ()=>JOB.stop);
     if(cacheDirty) saveCache();
     await save(rec);
     CUR=senAt(A.currentTime||0);
     huBuild(); renderKara(false); layoutSplit(); pgReset(); renderHu(true); paintCur(true);
-    progSet(100,'kész',gs.length+' mondat összefűzve');
+    progSet(100,'kész',n+' töredék igazítva mondathatárra');
     $('progStop').textContent='újra'; $('progHide').classList.remove('hid');
-    log('összefűzés: '+gs.length+' mondat, '+n+' töredék, '+need.length+' újrafordítás');
-    toast(gs.length+' szétvágott mondat összefűzve és újrafordítva',5000);
+    log('mondat-rendezés: '+n+' töredék, '+need.length+' újrafordítás');
+    toast('mondatokra rendezve — minden buborék egy mondat',5000);
   }catch(e){
-    log('összefűzés megállt:',e);
+    log('mondat-rendezés megállt:',e);
     progSet(99,'megállt',String(e.message).slice(0,180));
     $('progStop').textContent='újra'; $('progHide').classList.remove('hid');
   }finally{
@@ -2901,7 +2999,7 @@ async function cleanDupes(rec){
       progShow(false); JOB.on=false;
       return toast('nem találtam duplikátum-maradványt',4000);
     }
-    stitchSen(rec,false);
+    sentencize(rec,false);
     normSen(rec);
     const need=rec.sen.filter(x=>!x.hu);
     progSet(5,'tisztítás',n+' beavatkozás · '+need.length+' mondat újrafordítása');
@@ -2969,8 +3067,8 @@ async function rebuildText(rec,punct){
   const volt=rec.sen.length;
   try{
     rec.sen=neu;
+    sentencize(rec,false);     /* v53: mondat = töredék = buborék */
     normSen(rec);
-    stitchSen(rec,false);      /* ami mondat közepén lett elvágva, egy egység legyen */
     const need=rec.sen.filter(x=>!x.hu);
     if(need.length){
       progSet(5,'újraépítés',need.length+' töredék fordítása');
@@ -3452,60 +3550,12 @@ function huAlign(q,S){
   const hu=(q.hu||'').trim();
   if(!frs.length) return [];
   if(!hu) return [{a:q.a,b:q.b,i0:q.i0,i1:q.i1,txt:'',hu:''}];
-  const one=[{a:q.a,b:q.b,i0:q.i0,i1:q.i1,txt:hu,hu:hu}];
-  const w=hu.split(/\s+/).filter(Boolean), W=w.length;
-  if(W<HU_MINW*2) return one;
-  const cuts=huCuts(w);
-  if(!cuts.length) return one;                          /* nincs hol vágni: egyben */
-  /* A sorrend: EGY BUBORÉK = EGY MONDAT, ha a szöveg mondathatárt ad. Minden
-     mondatvégnél vágunk (ha mindkét oldal elég hosszú), és csak azt a részt bontjuk
-     tovább, ami így is túl hosszú marad — ott már tagmondathatárt is elfogadunk.
-     Ha egyáltalán nincs mondatvég, akkor csak a HU_MAXW-nél hosszabb szöveget
-     tagoljuk; egy vesszős, de egyetlen mondatból álló blokk EGYBEN marad. */
-  let at=[]; let prev=-1;
-  for(const c of cuts){
-    if(c.s<4) continue;
-    if(c.j-prev-1<HU_MINW||W-1-c.j<HU_MINW) continue;
-    at.push(c.j); prev=c.j;
-  }
-  const seg=[0].concat(at.map(j=>j+1)).concat([W]), extra=[];
-  for(let p=0;p<seg.length-1;p++){
-    const s0=seg[p], e0=seg[p+1], len=e0-s0;
-    if(len<=HU_MAXW) continue;
-    const loc=cuts.filter(c=>c.j>=s0&&c.j<e0-1).map(c=>({j:c.j-s0,s:c.s}));
-    if(!loc.length) continue;
-    const K2=Math.min(Math.max(2,Math.round(len/HU_TARGW)),loc.length+1);
-    huPick(w.slice(s0,e0),loc,K2).forEach(j=>extra.push(s0+j));
-  }
-  at=at.concat(extra).sort((x,y)=>x-y);
-  if(!at.length) return one;
-  /* szóhatárok → időhatárok. Minden rész kezdete a hozzá legközelebbi ANGOL
-     TÖREDÉK kezdetére ugrik (monoton, lehetőleg külön töredékre), hogy a két sáv
-     együtt váltson; ha több rész van, mint töredék, a töredéken belül arányosan
-     osztunk. */
-  const bd=[0].concat(at.map(j=>j+1)).concat([W]);
-  const N=bd.length-1, span=Math.max(0.05,q.b-q.a);
-  const starts=[q.a], fidx=[0];
-  let fp=0;
-  for(let p=1;p<N;p++){
-    const tgt=q.a+span*bd[p]/W;
-    let bi=fp,bd2=1e9;
-    for(let i=Math.min(fp,frs.length-1);i<frs.length;i++){
-      const d=Math.abs(frs[i].a-tgt);
-      if(d<bd2){ bd2=d; bi=i }
-    }
-    if(bi<=fp&&fp+1<frs.length&&N<=frs.length) bi=fp+1;   /* külön töredék, ha van */
-    if(bi>fp){ starts.push(frs[bi].a); fp=bi }
-    else starts.push(Math.max(starts[p-1]+0.05,tgt));      /* töredéken belül */
-    fidx.push(fp);
-  }
-  const out=[];
-  for(let p=0;p<N;p++){
-    out.push({a:starts[p],b:(p+1<N?starts[p+1]:q.b),
-              i0:q.i0+fidx[p],i1:q.i0+(p+1<N?Math.max(fidx[p],fidx[p+1]-0):frs.length-1),
-              txt:w.slice(bd[p],bd[p+1]).join(' '),hu:hu});
-  }
-  return out;
+  /* v53: az angol buborék és az alatta lévő magyar MINDIG ugyanaz a mondat —
+     a magyart nem tördeljük másképp, mint az angolt. Egy fordítási egység =
+     egy magyar blokk, faragás nélkül. (A tagmondat-alapú blokk-faragás a
+     mondat-elvű lánccal okafogyottá vált: a rec.sen elemei mondatok, és a
+     hosszú, írásjel nélküli szalag darabjai is külön egységek.) */
+  return [{a:q.a,b:q.b,i0:q.i0,i1:q.i1,txt:hu,hu:hu}];
 }
 function huBuild(){
   const S=REC?REC.sen:[];
@@ -4463,11 +4513,17 @@ async function openRec(rec,fileMaybe){
      egyforma kezdetek (halott mondatok) és az átfedések — megnyitáskor csendben
      rendbe tesszük, és csak akkor mentünk, ha tényleg változott. */
   {
+    /* v53: VESZTESÉGMENTES migráció — a régi felvételek breakLong-darabjai
+       (közös `full`) egy mondattá olvadnak, a kész magyar átöröklődik; a friss,
+       még fordítatlan töredékek mondathatárra igazodnak. Kész fordítás nem
+       vész el, API-hívás nincs. */
+    const mig=sentencize(rec,false);
+    if(mig) log('mondatokra rendezve megnyitáskor: '+mig+' töredék');
     const holt=deadSen(rec), ig=normSen(rec);
     if(ig){
       log('időrend rendezve megnyitáskor: '+ig+' igazítás'+(holt?', '+holt+' halott mondat':''));
-      txtPut(strip(rec)).catch(e=>log('időrend mentése:',e));
     }
+    if(mig||ig) txtPut(strip(rec)).catch(e=>log('megnyitási rendezés mentése:',e));
   }
   REC=rec; CUR=-1; loopA=loopB=null; MED=null;
   document.body.classList.add('playing');
@@ -5437,9 +5493,10 @@ $('pMore').onclick=()=>{
     /* v48: teljes újraépítés a meglévő felismerésből — a hangot nem kérdezzük újra */
     /* v51: a felismerő szeletén átnyúló mondatokat EGY fordítási egységgé fűzi, és
        csak az érintett mondatokat fordítja újra */
+    /* v53: buborék = mondat — szétvágott mondat egyé olvad, több mondat szétválik */
     (()=>{ const gs=REC?stitchGroups(REC):[];
       const db=gs.reduce((n,g)=>n+(g.i1-g.i0+1),0);
-      return {t:'mondatok összefűzése a fordításhoz'+(db?' ('+db+' töredék)':''),
+      return {t:'mondatokra rendezés (buborék = mondat)'+(db?' ('+db+' töredék)':''),
         fn:()=>stitchFix(REC)} })(),
     /* v52: a második átfutás részleges ismétlés-maradványait szedi ki
        („their game. their game", vég-eleje és határon átlógó duplikátumok),
@@ -6160,6 +6217,7 @@ window.HG={txtAll,txtGet,txtPut,txtDel,medAll,medGet,medDel,openMedia,cut,runJob
   senRuns, runsToSen, needPunct, repunct, punctRebuild, punctNorm,
   contd, stitchGroups, stitchSen, stitchFix,
   dedupText, dedupPair, dedupStraddle, dedupSen, cleanDupes, punctAsr, llmOk,
+  sentencize, splitFrag,
   sheetProcess,
   get job(){return JOB},
   syncHuFlow, huBuild, renderKara,

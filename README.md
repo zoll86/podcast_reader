@@ -13,6 +13,12 @@ olvasás helyett hallgatás.
 
 ## Mit tud
 
+- **Buborék = mondat (v53)**: az angol buborékban és az alatta lévő magyarban
+  mindig ugyanaz a mondat áll, és a fordítási kérésbe is mondat megy — vágni
+  csak mondathatáron szabad. A felismerő által szétvágott mondat egy töredékké
+  olvad, a több mondatot hordozó szétválik; a régi felvételek megnyitáskor
+  veszteség nélkül (újrafordítás nélkül) állnak át. A magyar blokk-faragás
+  megszűnt: egy mondat = egy magyar buborék
 - **Tiszta fordítási lánc (v52)**: a tördelési és fordítási hibák mérésen alapuló
   javítása. (1) A második átfutás részleges ismétlés-maradványait („their game.
   their game We understand…") egy determinisztikus tisztító automatikusan kiszedi
