@@ -1,7 +1,7 @@
 # Átadó — Kétnyelvű hallgató (hangoskönyv karaoke)
 
 Ez a dokumentum azért készült, hogy egy új beszélgetésben azonnal folytatható legyen a
-munka. Az utolsó kiadott állapot: **v49**.
+munka. Az utolsó kiadott állapot: **v51**.
 
 ## Mi ez
 
@@ -286,6 +286,86 @@ is) — a DeepL a gépi eszközben él. Teszt-beállító: `HG.setRec(rec,cur)`.
   lejátszófej előtt; ha <10 perc, ~5 perces falatot indít `runJob(...,{quiet:true})`
   módban (nincs folyamat-panel, hiba toast+napló). Bekapcsolása a fordítást is
   'live'-ra állítja. Tesztek: `followPlan` határesetei a runtestben.
+
+## v51: FÉL MONDATOKAT FORDÍTOTTUNK — a hiba a fordítás oldalán volt
+
+A felhasználó igazította helyre a keresést: „nem a buborék a lényeg, a kezelést
+FORDÍTÁSI szempontból vizsgáld". Ott volt a hiba, és a saját felvétele bizonyítja:
+
+```
+EN  „…One of them changed a light bulb for her The porch"
+HU  „…Egyikük izzót cserélt neki A tornác"
+EN  „light She's offering to sell the old light bulb…"
+HU  „fény Felajánlja, hogy eladja a régi izzót…"
+```
+
+A fordítási egység kulcsa `s.full || s.en`, és a `full` CSAK akkor van kitöltve, ha a
+`breakLong` maga vágta szét egy hosszú mondatot. Amikor viszont a **FELISMERŐ** vág a
+mondat közepén — mert ott ért véget a szelete —, nincs `full`, tehát a két félmondat
+KÜLÖN fordítási egység, és a fordító fél mondatot kap. A magyar ennek megfelelően
+csonka, és a hiba nem a megjelenítésben, hanem a bemenetben van: a legjobb tagolás sem
+tud utólag egész mondatot csinálni egy fél mondat fordításából.
+
+`stitchGroups` + `stitchSen`: a szomszédos töredékek, amelyek EGY mondatot alkotnak,
+közös `full`-t kapnak **még a fordítás előtt**. Folytatásnak az számít, ha a töredék nem
+mondatvégre végződik, és a következő 2 s-en belül kezdődik. `MAXF`=60 fölött nem
+egyesítünk — de a futamot nem is dobjuk el: annyit fűzünk össze, amennyi belefér, aztán
+új egységet kezdünk. (Az első változat egészben dobta el a hosszú futamokat, és emiatt a
+felhasználó felvételében 13 futamból csak 3-at talált meg — pont ott nem javított, ahol
+a legrosszabb volt.)
+
+**Automatikus:** minden `mergeSen` végén lefut (`force` nélkül, tehát csak azokat fűzi,
+amelyeknek MÉG NINCS fordítása — friss felismerésnél ez az összes), és az újraépítés
+végén is. Onnantól a fordító teljes mondatot kap, a `huBuild` egy blokknak látja, a
+`huAlign` pedig a magyart a töredékek határaihoz igazítja: a meglévő gépezet jól
+dolgozik, csak eddig rossz egységeket kapott.
+
+**A meglévő felvételekhez:** ⋯ → szöveg → **„mondatok összefűzése a fordításhoz (N
+töredék)"**. Ez `force`-szal fűz, eldobja a fél mondatokból készült magyart, és CSAK az
+érintett mondatokat fordítja újra (a felhasználó felvételében 13 mondat, 65 töredék). A
+többi fordításhoz nem nyúl.
+
+Teszt: **`stitchtest.js` 32 próba** — a folytatás felismerésének öt esete, a csoportok
+képzése és a MAXF-es bontás, hogy kész fordítást kérés nélkül nem dob el, hogy a
+fordítóhoz EGYETLEN kérés megy a TELJES mondattal (a teszt a kért sorokat méri), és a
+valódi felvételen a teljes menet.
+
+## v50: MONDATHATÁROK — a felismerő nem tett ki írásjelet
+
+A felhasználó exportált felvételét megmérve: **170 töredékből 53 nem írásjelre
+végződik és 34 kisbetűvel kezdődik.** Egész szakaszokon egyetlen pont sincs:
+„…introduced themselves to her Said they were ten feet tall, radiant And one of them was
+black…". Ez a magyarázata annak, hogy „nem kezel egyben mondatokat": a felismerő a
+mondatok KÖZEPÉN vágott, és nincs mit tagolni — a `splitSentences` írásjelet keres, ott
+pedig nincs. A v48-as újraépítés ezért nem is tudott mondatot csinálni, csak 26 szavas
+töredékeket.
+
+Írásjelet a szövegbe csak nyelvi tudás tud tenni. Az LLM-et ezért **kizárólag
+írásjelezésre** kérjük (`SYS_PUNCT`): ugyanazok a szavak, ugyanabban a sorrendben, csak
+pont, vessző, kérdőjel és nagy kezdőbetű kerül közéjük — se fordítás, se javítás, se
+átrendezés.
+
+**Ez ellenőrizhető, és ez a lényeg.** A `punctNorm` a válasz szavait írásjelek és
+kisbetű/nagybetű nélkül összefűzi, és összeveti az eredetivel. Ha nem betűre azonos, a
+választ **eldobjuk**, és marad a régi szöveg. A `puncttest` szándékosan hazudó modellt
+is szimulál (átírja a szöveget, elhagy szavakat, hálózati hiba) — mindhárom esetben a
+felismerés eredménye érintetlen marad. **Egy nyelvi modell nem tudja elrontani az
+adatot, csak javítani.**
+
+A menetrend: `senRuns` (a szófolyam szakaszai, 2 s-nél nagyobb szünetnél vágva) →
+`needPunct` (25 szónál ritkább mondatvég) → `repunct` 600 szavas kérésekben → a szavak
+visszaírása a szófolyamba (az IDŐK érintetlenek, mert szó szerinti a megfeleltetés) →
+`runsToSen` (a v48-as tagolás, ami most már talál mondatot) → a v48-as fordítás-átvétel
+és a v49-es időrend-rendezés.
+
+Menüpont: **„mondathatárok helyreállítása + újraépítés (N szakasz)"**, a ⋯ → szöveg
+szakaszban a sima újraépítés mellett. LLM-kulcs kell hozzá (Claude vagy egyéb API); a
+szám előre megmutatja, hány szakaszról van szó, tehát a költség becsülhető.
+
+Teszt: **`puncttest.js` 22 próba** — a felismerés (mikor kell írásjelezni), a válasz
+ellenőrzésének mindhárom bukó ága, és a felhasználó VALÓDI felvételén: a mondatvégre
+végződő töredékek aránya nő, a kisbetűvel kezdődők száma csökken, nincs halott mondat,
+minden töredéknek van magyarja, az idők monotonok, és kulcs nélkül nem indul el.
 
 ## v49: HALOTT MONDATOK — az igazi ok, amiért „átugorja a talált mondatokat"
 

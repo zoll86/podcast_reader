@@ -892,7 +892,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v49';
+const APP_VER='v51';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -2268,6 +2268,75 @@ function deadSen(rec){
   for(let i=0;i<S.length-1;i++) if(S[i+1].a<=S[i].a+0.05) n++;
   return n;
 }
+/* ======== v51: MONDATOK ÖSSZEFŰZÉSE A FORDÍTÁSHOZ ========
+   Ez a hiba a fordítás oldalán élt, nem a buborékokon. A fordítási egység kulcsa
+   `s.full || s.en`, és a `full` CSAK akkor van kitöltve, ha a `breakLong` maga vágott
+   szét egy hosszú mondatot. Amikor viszont a FELISMERŐ vág a mondat közepén — mert a
+   szelete ott ért véget —, nincs `full`, tehát a két félmondat KÜLÖN fordítási egység
+   lesz, és a fordító fél mondatokat kap. A felhasználó felvételében ez 34 helyen
+   történt meg, és a magyar ennek megfelelően csonka:
+
+     EN „…One of them changed a light bulb for her The porch"
+     HU „…Egyikük izzót cserélt neki A tornác"
+     EN „light She's offering to sell the old light bulb…"
+     HU „fény Felajánlja, hogy eladja a régi izzót…"
+
+   A javítás nem a megjelenítésben van: a szomszédos töredékeket, amelyek EGY mondatot
+   alkotnak, közös `full`-lal kell ellátni MÉG A FORDÍTÁS ELŐTT. Onnantól a fordító a
+   teljes mondatot kapja, a `huBuild` egy blokknak látja, a `huAlign` pedig a magyart a
+   töredékek határaihoz igazítja — vagyis a meglévő gépezet dolgozik jól.
+
+   Folytatásnak azt tekintjük, ha a töredék NEM mondatvégre végződik, és a következő
+   2 másodpercen belül kezdődik. `MAXF` felett nem fűzünk (v46: az írásjel nélküli
+   szalagból ne legyen irdatlan egység). */
+function contd(a,b){
+  if(!a||!b) return false;
+  if(/[.!?…]["»”')]?$/.test(String(a.en||'').trim())) return false;
+  return (b.a-a.b)<2.0;
+}
+function stitchGroups(rec){
+  const S=(rec&&rec.sen)||[], out=[];
+  const szo=x=>String(x.en||'').trim().split(/\s+/).filter(Boolean).length;
+  let i=0;
+  while(i<S.length){
+    let j=i;
+    while(j+1<S.length&&contd(S[j],S[j+1])) j++;
+    if(j>i){
+      /* a futamot MAXF alatti egységekre bontjuk, nem dobjuk el egészben */
+      let a=i, n=szo(S[i]);
+      for(let k=i+1;k<=j;k++){
+        const m=szo(S[k]);
+        if(n+m>MAXF&&k>a){
+          out.push({i0:a,i1:k-1,
+            txt:S.slice(a,k).map(x=>String(x.en||'').trim()).join(' ')});
+          a=k; n=m;
+        }else n+=m;
+      }
+      if(j>a) out.push({i0:a,i1:j,
+        txt:S.slice(a,j+1).map(x=>String(x.en||'').trim()).join(' ')});
+    }
+    i=j+1;
+  }
+  return out.filter(g=>g.i1>g.i0);
+}
+/* `force` nélkül csak azokat fűzi össze, amelyeknek MÉG NINCS fordítása (a friss
+   felismerésnél ez az összes) — így soha nem dobunk el kész magyar szöveget úgy,
+   hogy ne kérnénk rá újat. */
+function stitchSen(rec,force){
+  const gs=stitchGroups(rec), S=rec.sen;
+  let n=0;
+  for(const g of gs){
+    const tag=S.slice(g.i0,g.i1+1);
+    if(!force&&tag.some(x=>x.hu)) continue;
+    for(const x of tag){
+      if(x.full===g.txt) continue;
+      x.full=g.txt;
+      if(force){ x.hu=''; delete x.pairs; delete x.cls }
+      n++;
+    }
+  }
+  return n;
+}
 function mergeSen(rec,sen){
   if(!sen.length) return 0;
   const all=rec.sen.concat(sen).sort((a,b)=>a.a-b.a);
@@ -2289,6 +2358,10 @@ function mergeSen(rec,sen){
      megtalált mondat egy meglévővel egy időben indulhat, és soha nem kerül sorra */
   const igazitva=normSen(rec);
   if(igazitva) log('időrend: '+igazitva+' igazítás a beolvasztás után');
+  /* v51: a mondat közepén elvágott töredékek EGY fordítási egységet kapnak — ez a
+     fordítás ELŐTT kell megtörténnie, különben fél mondatokat fordítunk */
+  const fuzve=stitchSen(rec,false);
+  if(fuzve) log('összefűzés: '+fuzve+' töredék kapott teljes mondatot fordítási egységként');
   return added;
 }
 const norm=s=>s.toLowerCase().replace(/[^a-z0-9áéíóöőúüű ]/g,'').replace(/\s+/g,' ').trim();
@@ -2499,7 +2572,57 @@ function wordStream(rec){
     out[i].end=(i+1<out.length?Math.max(out[i].a+0.05,out[i+1].a):out[i].a+0.4);
   return out;
 }
-function rebuildSen(rec){
+const rebuildSen=rec=>runsToSen(senRuns(rec));
+/* ======== v50: MONDATHATÁROK helyreállítása ========
+   A felhasználó felvételében 170 töredékből 53 nem írásjelre végződik és 34 kisbetűvel
+   kezdődik: a felismerő a mondatok KÖZEPÉN vágott, és egész szakaszokon egyáltalán nem
+   tett ki írásjelet („…introduced themselves to her Said they were ten feet tall,
+   radiant And one of them was black…"). Ilyen szövegből a tagolás sem tud mondatot
+   csinálni — nincs mit keresnie —, tehát a buborékok töredékek maradnak.
+
+   Írásjelet a szövegbe csak nyelvi tudás tud tenni. Az LLM-et ezért NEM fordításra,
+   hanem KIZÁRÓLAG írásjelezésre kérjük meg: ugyanazok a szavak, ugyanabban a
+   sorrendben, csak pont, vessző, kérdőjel és nagy kezdőbetű kerül közéjük. Ez
+   ellenőrizhető: a visszakapott szavak sorozatát írásjelek nélkül összevetjük az
+   eredetivel, és ha nem egyezik, ELDOBJUK a választ, és marad a régi szöveg. Így a
+   felismerés eredményét egy nyelvi modell sem tudja elrontani.
+
+   Utána a szokásos újraépítés fut: a mondatokat már meg tudja találni. */
+const PUNCT_MAX=600;                       /* egy kérésben ennyi szó */
+const punctNorm=a=>a.map(x=>String(x).toLowerCase().replace(/[^a-z0-9']+/g,''))
+  .filter(Boolean).join(' ');
+function needPunct(words){
+  if(words.length<25) return false;
+  let veg=0;
+  for(const x of words) if(/[.!?…]["»”')]?$/.test(x)) veg++;
+  return veg/words.length<0.04;            /* 25 szónál ritkább mondatvég */
+}
+async function repunct(words){
+  const out=[];
+  for(let i=0;i<words.length;i+=PUNCT_MAX){
+    const rész=words.slice(i,i+PUNCT_MAX);
+    let got=null;
+    try{
+      const txt=await llmCall(SYS_PUNCT,rész.join(' '),Math.min(6000,Math.ceil(rész.length*2.4)+200));
+      const kap=String(txt||'').replace(/^```[a-z]*|```$/g,'').trim().split(/\s+/).filter(Boolean);
+      if(punctNorm(kap)===punctNorm(rész)) got=kap;
+      else log('írásjelezés: a válasz nem ugyanazokat a szavakat adta — eldobva ('+
+        rész.length+' szó helyett '+kap.length+')');
+    }catch(e){ log('írásjelezés:',e) }
+    out.push.apply(out,got||rész);
+  }
+  return out;
+}
+const SYS_PUNCT='You restore punctuation in an English transcript produced by speech '+
+ 'recognition. Rules, in order of importance: (1) return the SAME words in the SAME order; '+
+ '(2) never add, remove, translate, reorder or correct a word; (3) insert sentence-ending '+
+ 'punctuation (. ? !) and commas where they belong, and capitalise the first word of each '+
+ 'sentence; (4) keep existing punctuation unless it is clearly wrong. Output only the '+
+ 'corrected transcript, no commentary.';
+const llmCall=(sys,user,mx)=>(CFG.tr==='oai'&&CFG.oaiKey)?oaiCall(sys,user,mx):claudeCall(sys,user,mx);
+/* a szófolyam szakaszai (nagy szünetnél vágva) — az újraépítés és az írásjelezés is
+   ugyanezeken a szakaszokon dolgozik */
+function senRuns(rec){
   const W=wordStream(rec);
   if(!W.length) return [];
   const runs=[]; let cur=[W[0]];
@@ -2508,6 +2631,9 @@ function rebuildSen(rec){
     cur.push(W[i]);
   }
   runs.push(cur);
+  return runs;
+}
+function runsToSen(runs){
   const out=[];
   for(const run of runs){
     if(!run.length) continue;
@@ -2525,9 +2651,58 @@ function rebuildSen(rec){
   }
   return out;
 }
-async function rebuildText(rec){
+async function punctRebuild(rec,onProg){
+  const runs=senRuns(rec);
+  const kell=runs.filter(r=>needPunct(r.map(x=>x.t)));
+  let n=0;
+  for(const run of kell){
+    if(JOB.stop) break;
+    onProg&&onProg(++n,kell.length);
+    const got=await repunct(run.map(x=>x.t));
+    if(got.length===run.length) got.forEach((t,i)=>{ run[i].t=t });
+  }
+  return {sen:runsToSen(runs),szakasz:kell.length};
+}
+async function stitchFix(rec){
+  if(!rec||!(rec.sen||[]).length) return toast('nincs mit összefűzni');
+  if(JOB.on||RT) return toast('már fut egy feldolgozás');
+  const gs=stitchGroups(rec);
+  const db=gs.reduce((n,g)=>n+(g.i1-g.i0+1),0);
+  if(!db) return toast('minden mondat egyben van — nincs mit összefűzni',4000);
+  if(!confirm('Ebben a felvételben '+gs.length+' mondatot vágott szét a felismerő ('+
+    db+' töredék), ezért fél mondatok lettek lefordítva. Összefűzöm őket egy fordítási '+
+    'egységgé, és CSAK ezeket fordítom újra. A többi fordításhoz nem nyúlok.')) return;
+  JOB.on=true; JOB.stop=false;
+  progShow(true); $('progHide').classList.add('hid'); $('progStop').textContent='szüneteltetés';
+  try{
+    const n=stitchSen(rec,true);
+    normSen(rec);
+    const need=rec.sen.filter(x=>!x.hu);
+    progSet(5,'összefűzés',need.length+' mondat fordítása');
+    await fillHu(need,(k,t)=>progSet(5+k/Math.max(1,t)*90,'összefűzés',k+' / '+t),
+      ()=>JOB.stop);
+    if(cacheDirty) saveCache();
+    await save(rec);
+    CUR=senAt(A.currentTime||0);
+    huBuild(); renderKara(false); layoutSplit(); pgReset(); renderHu(true); paintCur(true);
+    progSet(100,'kész',gs.length+' mondat összefűzve');
+    $('progStop').textContent='újra'; $('progHide').classList.remove('hid');
+    log('összefűzés: '+gs.length+' mondat, '+n+' töredék, '+need.length+' újrafordítás');
+    toast(gs.length+' szétvágott mondat összefűzve és újrafordítva',5000);
+  }catch(e){
+    log('összefűzés megállt:',e);
+    progSet(99,'megállt',String(e.message).slice(0,180));
+    $('progStop').textContent='újra'; $('progHide').classList.remove('hid');
+  }finally{
+    JOB.on=false; if(cacheDirty) saveCache(); await save(rec); drawLib();
+  }
+}
+async function rebuildText(rec,punct){
   if(!rec||!(rec.sen||[]).length) return toast('nincs mit újraépíteni');
   if(JOB.on||RT) return toast('már fut egy feldolgozás');
+  if(punct&&!CFG.clKey&&!(CFG.tr==='oai'&&CFG.oaiKey)){
+    show('vSet'); return toast('az írásjelezéshez LLM-kulcs kell (Claude vagy egyéb API)',5000);
+  }
   /* a meglévő fordításokat a gyorstárba is beírjuk, hogy a változatlan egységek
      magyarja akkor is megmaradjon, ha a gyorstárat közben törölték */
   for(const sn of rec.sen){
@@ -2536,7 +2711,19 @@ async function rebuildText(rec){
     if(sn.pairs&&sn.pairs.length&&pcache[k]==null) pcache[k]=sn.pairs;
     if(sn.cls&&sn.cls.length&&ccache[k]==null) ccache[k]=sn.cls;
   }
-  const neu=rebuildSen(rec);
+  /* az írásjelezés hálózatot használ, tehát a folyamatjelző alá kell kerülnie */
+  let neu, szakasz=0;
+  if(punct){
+    JOB.on=true; JOB.stop=false;
+    progShow(true); $('progHide').classList.add('hid'); $('progStop').textContent='szüneteltetés';
+    try{
+      const r=await punctRebuild(rec,(k,n)=>progSet(k/Math.max(1,n)*60,'mondathatárok',
+        k+' / '+n+' szakasz'));
+      neu=r.sen; szakasz=r.szakasz;
+    }catch(e){ log('írásjelezés megállt:',e); JOB.on=false; progShow(false);
+      return toast('az írásjelezés elhasalt: '+e.message,5000) }
+    JOB.on=false;
+  }else neu=rebuildSen(rec);
   if(!neu.length) return toast('az újraépítés nem adott mondatokat — a szöveg érintetlen');
   let ujKulcs=0;
   const seen={};
@@ -2546,7 +2733,9 @@ async function rebuildText(rec){
     else if(!seen[k]){ seen[k]=1; ujKulcs++ }
   }
   if(!confirm('Újraépítem a szöveget a meglévő felismerésből: '+rec.sen.length+
-    ' töredék helyett '+neu.length+'. A hangot nem kérdezzük meg újra. '+
+    ' töredék helyett '+neu.length+'. '+
+    (szakasz?szakasz+' szakaszban helyreálltak a mondathatárok. ':'')+
+    'A hangot nem kérdezzük meg újra. '+
     (ujKulcs?ujKulcs+' új fordítási egység készül el, a többi magyar szöveg megmarad.'
             :'Minden mostani fordítás felhasználható, új fordítás nem kell.'))) return;
   JOB.on=true; JOB.stop=false;
@@ -2555,6 +2744,7 @@ async function rebuildText(rec){
   try{
     rec.sen=neu;
     normSen(rec);
+    stitchSen(rec,false);      /* ami mondat közepén lett elvágva, egy egység legyen */
     const need=rec.sen.filter(x=>!x.hu);
     if(need.length){
       progSet(5,'újraépítés',need.length+' töredék fordítása');
@@ -2568,7 +2758,8 @@ async function rebuildText(rec){
     drawSeek();
     progSet(100,'kész',volt+' → '+rec.sen.length+' töredék');
     $('progStop').textContent='újra'; $('progHide').classList.remove('hid');
-    log('újraépítés: '+volt+' → '+rec.sen.length+' töredék, '+ujKulcs+' új egység');
+    log('újraépítés: '+volt+' → '+rec.sen.length+' töredék, '+ujKulcs+' új egység'+
+      (szakasz?', '+szakasz+' szakasz írásjelezve':''));
     toast('a szöveg újraépült: '+volt+' → '+rec.sen.length+' töredék',5000);
   }catch(e){
     log('újraépítés megállt:',e);
@@ -5012,7 +5203,18 @@ $('pMore').onclick=()=>{
     /* v47: a dalos/zene alatti szakaszok egyetlen óriás fordítási egységet kapnak a
        felismerőtől — ez vágja szét őket töredékenként (csak azokat fordítja újra) */
     /* v48: teljes újraépítés a meglévő felismerésből — a hangot nem kérdezzük újra */
+    /* v51: a felismerő szeletén átnyúló mondatokat EGY fordítási egységgé fűzi, és
+       csak az érintett mondatokat fordítja újra */
+    (()=>{ const gs=REC?stitchGroups(REC):[];
+      const db=gs.reduce((n,g)=>n+(g.i1-g.i0+1),0);
+      return {t:'mondatok összefűzése a fordításhoz'+(db?' ('+db+' töredék)':''),
+        fn:()=>stitchFix(REC)} })(),
     {t:'szöveg újraépítése (angol tagolás + magyar)',fn:()=>rebuildText(REC)},
+    /* v50: ha a felismerő nem tett ki írásjelet, a tagolás sem tud mondatot találni —
+       ez LLM-mel visszateszi az írásjeleket (a szavakhoz nem nyúl), aztán újraépít */
+    (()=>{ const r=REC?senRuns(REC).filter(x=>needPunct(x.map(y=>y.t))).length:0;
+      return {t:'mondathatárok helyreállítása + újraépítés'+(r?' ('+r+' szakasz)':''),
+        fn:()=>rebuildText(REC,true)} })(),
     (()=>{ const n=REC?hugeUnits(REC).length:0;
       return {t:'összefolyó fordítások szétvágása'+(n?' ('+n+' töredék)':''),
         fn:()=>splitUnits(REC)} })(),
@@ -5719,6 +5921,8 @@ window.HG={txtAll,txtGet,txtPut,txtDel,medAll,medGet,medDel,openMedia,cut,runJob
   passCalls, passRange, sheetNew, mergeSen, toSentences,
   breakLong, splitSentences, closeRec, layoutSplit, hugeUnits, splitUnits,
   wordStream, rebuildSen, rebuildText, normSen, deadSen, senAt,
+  senRuns, runsToSen, needPunct, repunct, punctRebuild, punctNorm,
+  contd, stitchGroups, stitchSen, stitchFix,
   sheetProcess,
   get job(){return JOB},
   syncHuFlow, huBuild, renderKara,
