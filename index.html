@@ -919,7 +919,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v56';
+const APP_VER='v57';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -1895,7 +1895,12 @@ async function llmPairs(items,eng){
 async function llmLines(lines,eng){
   const e=eng||CFG.tr;
   const user=lines.map((l,i)=>(i+1)+'. '+l).join('\n');
-  const raw=(e==='oai'?await oaiCall(SYS_TR,user):await claudeCall(SYS_TR,user))
+  /* v57: a válaszkeret a bemenethez skálázódik. A v53 óta az egység TELJES
+     mondat, és 10 hosszú mondat magyarja nem fért az 1400-as alapkeretbe —
+     a JSON csonkult, az egész köteg kárba veszett. A magyar ~0,45 token/karakter,
+     kétszeres ráhagyással és JSON-terheléssel: */
+  const mx=Math.min(4000,Math.max(800,Math.round(user.length*0.9)+300));
+  const raw=(e==='oai'?await oaiCall(SYS_TR,user,mx):await claudeCall(SYS_TR,user,mx))
     .replace(/```json|```/g,'').trim();
   const arr=JSON.parse(raw.slice(raw.indexOf('['),raw.lastIndexOf(']')+1));
   if(!Array.isArray(arr)||arr.length!==lines.length) throw new Error('nem illeszkedő válasz');
@@ -1983,7 +1988,7 @@ async function retrUnit(gi,eng){
   const S=REC.sen;
   toast(ENGN[eng]+' — fordítás…');
   let r;
-  try{ r=await trOne(u.k,eng,!!CFG.pairs&&eng!=='free') }
+  try{ r=await trOne(u.k,eng,false) }   /* v57: az újrafordítás csak fordít */
   catch(e){ log('újrafordítás:',e); return toast('nem sikerült: '+(e.message||e),5000) }
   if(!r.hu) return toast('a fordító nem adott választ');
   for(const i of u.idx){
@@ -2049,7 +2054,7 @@ async function fillHu(list,onStep,stopFn){
   for(let i=0;i<keys.length;i+=10){
     if(stopFn&&stopFn()) break;
     try{ await trBatch(keys.slice(i,i+10)) }catch(e){}
-    onStep&&onStep(Math.min(i+10,keys.length),keys.length);
+    onStep&&onStep(Math.min(i+5,keys.length),keys.length);
     await sleep(120);
   }
   let n=0;
@@ -2059,12 +2064,11 @@ async function fillHu(list,onStep,stopFn){
     if(!s.pairs&&pcache[k]) s.pairs=pcache[k];
     if(!s.cls&&ccache[k]) s.cls=ccache[k];
   }
-  /* v52: bekapcsolt szópároknál a párok a fordítás UTÁN, külön (könnyebb)
-     kéréssel készülnek, a kész magyarhoz horgonyozva */
-  if(CFG.pairs&&CFG.tr!=='free'&&CFG.tr!=='deepl'){
-    try{ await fillPairs(list,null,stopFn) }
-    catch(e){ log('szópárok a fordítás után:',e) }
-  }
+  /* v57: az automatikus szópár-menet KIKERÜLT a fordítási útból — minden
+     fordítási korty után ment egy második kérés is, ami a feldolgozást
+     megduplázta és sokszor csonka JSON-nal kárba veszett. Szópár mostantól
+     KIZÁRÓLAG kérésre készül: ⋯ → „szöveg rendbetétele" (jóváhagyással,
+     folyamatjelzővel). A fordítás útja tiszta és gyors. */
   return n;
 }
 
@@ -2084,9 +2088,10 @@ async function fillPairs(list,onStep,stopFn){
     byKey[k].push(s);
   }
   let n=0;
-  for(let i=0;i<keys.length;i+=10){
+  /* v57: 5-ös köteg — 10 tétel szópárjai a 2400-as keretben csonkultak */
+  for(let i=0;i<keys.length;i+=5){
     if(stopFn&&stopFn()) break;
-    const batch=keys.slice(i,i+10);
+    const batch=keys.slice(i,i+5);
     try{
       const items=batch.map(k=>({en:k,hu:cache[k]||(byKey[k][0]&&byKey[k][0].hu)||''}));
       const rich=await llmPairs(items);
@@ -4468,11 +4473,11 @@ function learnSet(on){
     if(CFG.tr==='free'||CFG.tr==='deepl'){
       toast('a tanuló módhoz LLM-fordító kell (Claude vagy egyéb API) — a beállításokban'); return;
     }
-    if(!CFG.pairs){
-      CFG.pairs=1; saveCfg();
-      toast('szópárok gyűjtése bekapcsolva — a MÁR lefordított részekhez a ⋯ menü '+
-            '„szópárok pótlása" pontja kell');
-    }
+    /* v57: a tanuló mód NEM kapcsol be semmilyen háttérgyűjtést — a szópárak a
+       ⋯ → „szöveg rendbetétele" futásából jönnek, kérésre */
+    if(!CFG.pairs){ CFG.pairs=1; saveCfg() }
+    if(REC&&REC.sen.some(x=>x.hu&&(!x.pairs||!x.pairs.length)))
+      toast('szópárokhoz futtasd: ⋯ → „szöveg rendbetétele"',5000);
     if(CFG.huMode!=='split'){ CFG.huMode='split'; drawHuBtn() }
   }
   CFG.learn=on?1:0; saveCfg();

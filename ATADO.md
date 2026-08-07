@@ -1,5 +1,15 @@
 ---
 
+# KIEGÉSZÍTÉS — v57: A FELDOLGOZÁS GYORS ÚJRA
+
+Az automatikus szópár-menet (v52: fillHu → fillPairs) KIKERÜLT — a tanuló mód
+egyszer beállította a CFG.pairs=1-et, és onnantól minden fordítás duplázódott,
+a második kérés sokszor csonkán veszett kárba. Szópár csak a textDoctorból
+készül (5-ös köteg). A llmLines válaszkerete a bemenethez skálázódik
+(800–4000 token) — a v53-as teljes mondatos egységek 10-es kötege nem fért a
+fix 1400-ba, ez adta a „Unexpected end of JSON input" hibákat. Részletek:
+VALTOZASOK_v57.md.
+
 # KIEGÉSZÍTÉS — v55–v56: KÉNYELEM ÉS DESIGN
 
 v55: „listába…" a könyvtári kártya ⋯ menüjébe (eddig csak a lejátszóból ment).
