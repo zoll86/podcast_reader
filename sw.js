@@ -2,7 +2,7 @@
    FIGYELEM: minden kiadásnál át kell írni a verziót itt IS és az index.html
    APP_VER sorában. Ha csak az egyik változik, a telefon a régi, cache-elt
    változatot mutatja, és a hibajavítás nem jut el a készülékig. */
-const VER='hallgato-v57';
+const VER='hallgato-v58';
 const FILES=['./','index.html','manifest.webmanifest',
   'icons/icon-192.png','icons/icon-512.png','icons/maskable-512.png','icons/apple-180.png'];
 

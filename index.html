@@ -462,6 +462,10 @@ body.breath .hs.cur:after{content:'⋯';position:absolute;right:12px;bottom:4px;
   font-family:var(--mono);font-size:var(--t3);color:var(--gold);
   animation:bpulse 1.1s ease infinite}
 @keyframes bpulse{0%,100%{opacity:.25}50%{opacity:.9}}
+/* v58: borító-miniatűr a lap-sorokban (hosszú listák) */
+.btn.hasThumb{display:flex;align-items:center;gap:10px;text-align:left}
+.btn.hasThumb .thumb{width:44px;height:44px;border-radius:8px;object-fit:cover;
+  flex:none;background:var(--line2)}
 /* v56: behúzó-kártya csukva/nyitva */
 #intakeTog{cursor:pointer;position:relative;margin-bottom:0}
 #intakeTog:after{content:'▾';position:absolute;right:2px;top:2px;color:var(--faint);
@@ -919,7 +923,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v57';
+const APP_VER='v58';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -3045,14 +3049,13 @@ async function textDoctor(rec){
   const rend=sentencize(proba,true)+tidySen(proba,true);   /* iterálva, amíg stabil */
   const runs=senRuns(rec).filter(x=>needPunct(x.map(y=>y.t))).length;
   const hiany=proba.sen.filter(x=>!x.hu).length;
-  const wantPar=CFG.pairs&&CFG.tr!=='free'&&CFG.tr!=='deepl';
-  const par=wantPar?proba.sen.filter(x=>x.hu&&(!x.pairs||!x.pairs.length)).length:0;
+  /* v58: szópár-diagnózis NINCS — a felismerés és a fordítás az egyetlen cél,
+     tanulói kérés semmilyen úton nem megy ki */
   const lelet=[];
   if(dup) lelet.push(dup+' duplikátum-maradvány');
   if(rend) lelet.push(rend+' mondathatárra igazítandó buborék');
   if(runs) lelet.push(runs+' írásjel nélküli szakasz'+(llmOk()?'':' — LLM-kulcs híján ez kimarad'));
   if(hiany) lelet.push(hiany+' hiányzó fordítás');
-  if(par) lelet.push(par+' mondat szópár nélkül');
   if(!lelet.length) return toast('a szöveg rendben van — nincs teendő',4000);
   if(!confirm('Ezt találtam:\n\n• '+lelet.join('\n• ')+
     '\n\nRendbe tegyem? Csak az érintett mondatok fordulnak újra, a többihez nem nyúlok.')) return;
@@ -3067,12 +3070,7 @@ async function textDoctor(rec){
     const need=rec.sen.filter(x=>!x.hu);
     if(need.length){
       progSet(5,'rendbetétel',need.length+' mondat fordítása');
-      await fillHu(need,(k,t)=>progSet(5+k/Math.max(1,t)*(par?70:90),'rendbetétel',k+' / '+t),
-        ()=>JOB.stop);
-    }
-    if(par&&!JOB.stop){
-      progSet(80,'rendbetétel','szópárok pótlása');
-      await fillPairs(rec.sen,(k,t)=>progSet(80+k/Math.max(1,t)*15,'rendbetétel','szópárok: '+k+' / '+t),
+      await fillHu(need,(k,t)=>progSet(5+k/Math.max(1,t)*90,'rendbetétel',k+' / '+t),
         ()=>JOB.stop);
     }
     if(cacheDirty) saveCache();
@@ -4473,11 +4471,11 @@ function learnSet(on){
     if(CFG.tr==='free'||CFG.tr==='deepl'){
       toast('a tanuló módhoz LLM-fordító kell (Claude vagy egyéb API) — a beállításokban'); return;
     }
-    /* v57: a tanuló mód NEM kapcsol be semmilyen háttérgyűjtést — a szópárak a
-       ⋯ → „szöveg rendbetétele" futásából jönnek, kérésre */
-    if(!CFG.pairs){ CFG.pairs=1; saveCfg() }
+    /* v58: a szópár-gyűjtés MINDEN útvonalon szünetel — a felismerés és a
+       fordítás tökéletesítése az egyetlen cél. A tanuló mód a MÁR meglévő
+       párokkal megy; új párok most nem készülnek. */
     if(REC&&REC.sen.some(x=>x.hu&&(!x.pairs||!x.pairs.length)))
-      toast('szópárokhoz futtasd: ⋯ → „szöveg rendbetétele"',5000);
+      toast('a szópár-gyűjtés most szünetel — a tanuló mód a meglévő párokkal megy',5000);
     if(CFG.huMode!=='split'){ CFG.huMode='split'; drawHuBtn() }
   }
   CFG.learn=on?1:0; saveCfg();
@@ -5060,7 +5058,8 @@ async function sheetQueue(lid){
     const most=REC&&REC.id===id;
     const hol=(r.pos>5&&r.dur&&r.pos<r.dur-8)?' · '+fmtT(r.pos):
       ((r.dur&&r.pos>=r.dur-8)?' · kész':'');
-    items.push({t:(most?'▶ ':'')+(i+1)+'. '+r.name+hol,pri:most?1:0,
+    items.push({art:coverUrl(r.id,r.cover),
+      t:(most?'▶ ':'')+(i+1)+'. '+r.name+hol,pri:most?1:0,
       fn:async()=>{ closeSheet(); await openRec(r); try{ await A.play() }catch(e){} },
       x:{t:'✕',title:'kivétel a listából',fn:()=>{
         listRemove(id); drawLib();
@@ -5070,6 +5069,11 @@ async function sheetQueue(lid){
       }}});
   });
   items.push({head:'lista'});
+  /* v58: a polcon a lista kibontva is nézhető — ugyanaz a csempés borítónézet,
+     mint kinn. (A kártyán a „N rész" pöttyre koppintva is ez vált.) */
+  items.push({t:l.open?'borítónézet elrejtése a polcon':'borítónézet a polcon (részek csempéi)',
+    fn:()=>{ l.open=l.open?0:1; saveCfg(); drawLib();
+      if(l.open) toast('a lista kibontva a polcon — a részek csempéi a kártya alatt') }});
   if(REC&&listOf(REC.id)===l){
     const i=l.items.indexOf(REC.id);
     /* a kivételhez már nem kell megnyitni a részt: minden soron ott a ✕ */
@@ -5618,6 +5622,14 @@ function sheet(title,items){
     const btn=document.createElement('button');
     btn.className='btn'+(it.pri?' pri':'')+(it.dang?' dang':'');
     btn.textContent=it.t;
+    /* v58: sor-miniatűr (borító) a hosszú listákhoz */
+    if(it.art){
+      btn.classList.add('hasThumb');
+      const im=document.createElement('img');
+      im.className='thumb'; im.alt=''; im.src=it.art;
+      im.onerror=()=>im.remove();
+      btn.prepend(im);
+    }
     btn.onclick=()=>{ closeSheet(); setTimeout(()=>it.fn&&it.fn(),60) };
     /* Egy sor MÁSODIK művelete (pl. „✕ kivétel"). Eddig egy sor egy gomb volt,
        tehát a lista részeire csak a lejátszás jutott — a kivételhez külön lapra

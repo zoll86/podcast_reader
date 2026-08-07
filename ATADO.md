@@ -1,5 +1,12 @@
 ---
 
+# KIEGÉSZÍTÉS — v58
+
+Tanulói (szópár-)kérés SEMMILYEN úton nem megy ki (textDoctor-ból is ki; a
+learnSet nem állít CFG.pairs-t, csak tájékoztat). A sheet-renderelő it.art-tal
+miniatűrt tesz a sor elé; a sheetQueue a részek borítóját mutatja és kapcsolót
+ad a polc-kibontásra (l.open). Részletek: VALTOZASOK_v58.md.
+
 # KIEGÉSZÍTÉS — v57: A FELDOLGOZÁS GYORS ÚJRA
 
 Az automatikus szópár-menet (v52: fillHu → fillPairs) KIKERÜLT — a tanuló mód
