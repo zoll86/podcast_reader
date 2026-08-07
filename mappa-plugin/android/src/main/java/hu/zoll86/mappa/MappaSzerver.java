@@ -10,19 +10,19 @@ import java.net.Socket;
 import java.net.URLDecoder;
 
 /**
- * MINI HTTP-KISZOLGALO a mappa fajljaihoz (csak localhost).
+ * MINI HTTP-KISZOLGÁLÓ a mappa fájljaihoz (csak localhost).
  *
- * Miert: a webapp teljes bonto- es szeletelo-gepezete file.slice()-ra epul,
- * a lejatszo pedig A.src-re. Ha a mappa fajljait localhoston kiszolgaljuk
- * Range-fejleccel, akkor
- *   - az <audio> elem KOZVETLENUL streamel (nincs memoriaba olvasas, a seek is
- *     mukodik: egy nyolcoras m4b-t nem kell betolteni),
- *   - a fetch(url,{headers:{Range}}) VALODI Blobot ad, tehat a mp4/mp3/wav/adts
- *     bontok es a szeletelo egyetlen sor valtoztatas nelkul mukodnek tovabb.
+ * Miért: a webapp teljes bontó- és szeletelő-gépezete `file.slice()`-ra épül,
+ * a lejátszó pedig `A.src`-re. Ha a mappa fájljait localhoston kiszolgáljuk
+ * Range-fejléccel, akkor
+ *   - az <audio> elem KÖZVETLENÜL streamel (nincs memóriába olvasás, a seek is
+ *     működik: egy nyolcórás m4b-t nem kell betölteni),
+ *   - a `fetch(url,{headers:{Range}})` VALÓDI Blobot ad, tehát a mp4/mp3/wav/adts
+ *     bontók és a szeletelő egyetlen sor változtatás nélkül működnek tovább.
  *
- * A kiszolgalo csak a hurok-illesziton (127.0.0.1) hallgat, kizarolag a
- * kijelolt mappa ala tartozo content:// URI-kat adja ki, es egy futasonkent
- * generalt titkos jegy (token) nelkul minden kerest elutasit.
+ * A kiszolgáló csak a hurok-illesztőn (127.0.0.1) hallgat, kizárólag a
+ * kijelölt mappa alá tartozó content:// URI-kat adja ki, és egy futásonként
+ * generált titkos jegy (token) nélkül minden kérést elutasít.
  */
 class MappaSzerver implements Runnable {
 
@@ -61,7 +61,7 @@ class MappaSzerver implements Runnable {
                 s = sock.accept();
                 kezel(s);
             } catch (Exception e) {
-                /* a bezart socket kivetele normalis leallasnal */
+                /* a bezárt socket kivétele normális leállásnál */
             } finally {
                 try { if (s != null) s.close(); } catch (Exception ignored) { }
             }
@@ -73,6 +73,7 @@ class MappaSzerver implements Runnable {
         InputStream in = s.getInputStream();
         OutputStream out = s.getOutputStream();
 
+        /* --- kéréssor és fejlécek --- */
         StringBuilder fej = new StringBuilder();
         int c, ures = 0;
         while ((c = in.read()) != -1) {
@@ -87,7 +88,7 @@ class MappaSzerver implements Runnable {
         String[] sorok = fej.toString().split("\r?\n");
         if (sorok.length == 0) return;
         String[] elso = sorok[0].split(" ");
-        if (elso.length < 2) { hiba(out, 400, "hibas keres"); return; }
+        if (elso.length < 2) { hiba(out, 400, "hibás kérés"); return; }
         String metodus = elso[0];
         String utvonal = elso[1];
 
@@ -99,13 +100,14 @@ class MappaSzerver implements Runnable {
                 range = sorok[i].substring(k + 1).trim();
         }
 
+        /* --- paraméterek --- */
         String uriS = param(utvonal, "uri"), jegyS = param(utvonal, "t");
-        if (jegyS == null || !jegy.equals(jegyS)) { hiba(out, 403, "hibas jegy"); return; }
+        if (jegyS == null || !jegy.equals(jegyS)) { hiba(out, 403, "hibás jegy"); return; }
         if (uriS == null) { hiba(out, 400, "nincs uri"); return; }
 
         Uri uri = Uri.parse(uriS);
         long teljes = meret(uri);
-        if (teljes <= 0) { hiba(out, 404, "a fajl nem olvashato"); return; }
+        if (teljes <= 0) { hiba(out, 404, "a fájl nem olvasható"); return; }
 
         long tol = 0, ig = teljes - 1;
         boolean reszleges = false;
@@ -118,7 +120,7 @@ class MappaSzerver implements Runnable {
                     if (!a.isEmpty()) {
                         tol = Long.parseLong(a);
                         if (!b.isEmpty()) ig = Math.min(teljes - 1, Long.parseLong(b));
-                    } else if (!b.isEmpty()) {
+                    } else if (!b.isEmpty()) {                 /* bytes=-N : a vég */
                         long n = Long.parseLong(b);
                         tol = Math.max(0, teljes - n);
                     }
@@ -126,7 +128,7 @@ class MappaSzerver implements Runnable {
                 } catch (Exception ignored) { }
             }
         }
-        if (tol >= teljes) { hiba(out, 416, "a kert tartomany a fajl vegen tul van"); return; }
+        if (tol >= teljes) { hiba(out, 416, "a kért tartomány a fájl végén túl van"); return; }
         long hossz = ig - tol + 1;
 
         String mime = tipus(uriS);
@@ -138,6 +140,7 @@ class MappaSzerver implements Runnable {
         if (reszleges)
             h.append("Content-Range: bytes ").append(tol).append('-').append(ig)
              .append('/').append(teljes).append("\r\n");
+        /* a WebView más origin-ből kéri, ezért kell a CORS-engedély */
         h.append("Access-Control-Allow-Origin: *\r\n");
         h.append("Access-Control-Allow-Headers: Range\r\n");
         h.append("Access-Control-Expose-Headers: Content-Range, Content-Length\r\n");
@@ -148,6 +151,7 @@ class MappaSzerver implements Runnable {
             out.flush(); return;
         }
 
+        /* --- törzs --- */
         InputStream fin = null;
         try {
             fin = ctx.getContentResolver().openInputStream(uri);
@@ -168,7 +172,7 @@ class MappaSzerver implements Runnable {
             }
             out.flush();
         } catch (Exception e) {
-            /* a lejatszo gyakran felbehagyja a kerest seek-nel - ez normalis */
+            /* a lejátszó gyakran félbehagyja a kérést seek-nél — ez normális */
         } finally {
             try { if (fin != null) fin.close(); } catch (Exception ignored) { }
         }

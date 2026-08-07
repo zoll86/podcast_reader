@@ -16,26 +16,29 @@ import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.ActivityCallback;
 import com.getcapacitor.annotation.CapacitorPlugin;
 
+import org.json.JSONArray;
+
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 
 /**
- * PODCAST-MAPPA (SAF) - a Ketnyelvu hallgato nativ mappa-hozzaferese.
+ * PODCAST-MAPPA (SAF) — a Kétnyelvű hallgató natív mappa-hozzáférése.
  *
- * Miert kell: az androidos bongeszoben nincs konyvtarvalaszto API, ezert a
- * webapp mindent a sajat tarolojaba masolt - dupla tarhely, es minden
- * hangfajlt kezzel kellett behuzni. Ez a plugin a rendszer konyvtarvalasztojat
- * (Storage Access Framework) hasznalja: a felhasznalo EGYSZER kijeloli a
- * podcast-mappajat, az app tartos olvasasi jogot kap ra, es onnantol a
- * konyvtar = a mappa tartalma. A fajlok ott maradnak, ahol vannak.
+ * Miért kell: az androidos böngészőben nincs könyvtárválasztó API, ezért a
+ * webapp mindent a saját tárolójába másolt — dupla tárhely, és minden
+ * hangfájlt kézzel kellett behúzni. Ez a plugin a rendszer könyvtárválasztóját
+ * (Storage Access Framework) használja: a felhasználó EGYSZER kijelöli a
+ * podcast-mappáját, az app tartós olvasási jogot kap rá, és onnantól a
+ * könyvtár = a mappa tartalma. A fájlok ott maradnak, ahol vannak.
  *
- * A hangot NEM adjuk at egyben: a read metodus bajt-tartomanyt ad vissza
- * base64-ben, a szerver pedig Range-fejleccel streamel.
+ * A hangot NEM adjuk át egyben (egy nyolcórás m4b memóriába olvasása
+ * elfogyasztaná a WebView-t): a `read` metódus bájt-tartományt ad vissza
+ * base64-ben, pontosan úgy, ahogy a felismerés szeletelője kéri.
  *
- * Raadas: a http metodus nativ HTTP-t ad, amire NEM vonatkozik a CORS -
- * ezzel az RSS-feedek proxy nelkul toltodnek.
+ * Ráadás: a `http` metódus natív HTTP-t ad, amire NEM vonatkozik a CORS —
+ * ezzel az RSS-feedek proxy nélkül töltődnek.
  */
 @CapacitorPlugin(name = "Mappa")
 public class MappaPlugin extends Plugin {
@@ -47,7 +50,10 @@ public class MappaPlugin extends Plugin {
     private String jegy;
     private int port;
 
-    /** A kiszolgalo elinditasa (idempotens). */
+    /**
+     * A kiszolgáló elindítása (idempotens) — a webapp ezt kéri legelőször, és
+     * megkapja a localhost-előtagot, amiből a fájl-URL-eket építi.
+     */
     @PluginMethod
     public void serve(PluginCall call) {
         try {
@@ -61,7 +67,7 @@ public class MappaPlugin extends Plugin {
             r.put("token", jegy);
             call.resolve(r);
         } catch (Exception e) {
-            call.reject("a kiszolgalo nem indult: " + e.getMessage());
+            call.reject("a kiszolgáló nem indult: " + e.getMessage());
         }
     }
 
@@ -71,7 +77,7 @@ public class MappaPlugin extends Plugin {
         super.handleOnDestroy();
     }
 
-    /* ---------- a mappa kijelolese (egyszeri) ---------- */
+    /* ---------- a mappa kijelölése (egyszeri) ---------- */
 
     @PluginMethod
     public void pick(PluginCall call) {
@@ -87,10 +93,11 @@ public class MappaPlugin extends Plugin {
         Intent data = result.getData();
         Uri tree = (data != null) ? data.getData() : null;
         if (tree == null) {
-            call.reject("nem valasztottal mappat");
+            call.reject("nem választottál mappát");
             return;
         }
         try {
+            /* tartós jog: újraindítás után is megvan */
             getContext().getContentResolver().takePersistableUriPermission(
                     tree, Intent.FLAG_GRANT_READ_URI_PERMISSION);
         } catch (Exception ignored) { }
@@ -117,19 +124,19 @@ public class MappaPlugin extends Plugin {
         call.resolve();
     }
 
-    /* ---------- a mappa tartalma ---------- */
+    /* ---------- a mappa tartalma (alkönyvtárakkal együtt) ---------- */
 
     @PluginMethod
     public void list(PluginCall call) {
         String s = getContext().getSharedPreferences(PREF, 0).getString(KEY_TREE, null);
-        if (s == null) { call.reject("nincs kijelolt mappa"); return; }
+        if (s == null) { call.reject("nincs kijelölt mappa"); return; }
         JSArray out = new JSArray();
         try {
             Uri tree = Uri.parse(s);
             String rootId = DocumentsContract.getTreeDocumentId(tree);
             bejar(tree, rootId, out, "", 0);
         } catch (Exception e) {
-            call.reject("a mappa nem olvashato: " + e.getMessage());
+            call.reject("a mappa nem olvasható: " + e.getMessage());
             return;
         }
         JSObject r = new JSObject();
@@ -137,6 +144,7 @@ public class MappaPlugin extends Plugin {
         call.resolve(r);
     }
 
+    /** Rekurzív bejárás, legfeljebb 3 szint mélyen (podcast-mappa/műsor/epizód). */
     private void bejar(Uri tree, String docId, JSArray out, String utvonal, int melyseg) {
         if (melyseg > 3 || out.length() > 3000) return;
         Uri kids = DocumentsContract.buildChildDocumentsUriUsingTree(tree, docId);
@@ -184,19 +192,20 @@ public class MappaPlugin extends Plugin {
                 || n.endsWith(".opus") || n.endsWith(".flac") || n.endsWith(".mp4");
     }
 
-    /* ---------- olvasas bajt-tartomanyban ---------- */
+    /* ---------- olvasás bájt-tartományban (a szeleteléshez) ---------- */
 
     @PluginMethod
     public void read(PluginCall call) {
         String uri = call.getString("uri");
         if (uri == null) { call.reject("nincs uri"); return; }
         long tol = call.getLong("offset", 0L);
+        /* alapból 1 MB; a szeletelő ennél nagyobbat is kérhet */
         int hossz = call.getInt("length", 1024 * 1024);
-        if (hossz > 12 * 1024 * 1024) hossz = 12 * 1024 * 1024;
+        if (hossz > 12 * 1024 * 1024) hossz = 12 * 1024 * 1024;   /* memória-védelem */
         InputStream in = null;
         try {
             in = getContext().getContentResolver().openInputStream(Uri.parse(uri));
-            if (in == null) { call.reject("a fajl nem nyithato meg"); return; }
+            if (in == null) { call.reject("a fájl nem nyitható meg"); return; }
             long ugrando = tol;
             while (ugrando > 0) {
                 long n = in.skip(ugrando);
@@ -217,12 +226,13 @@ public class MappaPlugin extends Plugin {
             r.put("eof", ossz < hossz);
             call.resolve(r);
         } catch (Exception e) {
-            call.reject("olvasasi hiba: " + e.getMessage());
+            call.reject("olvasási hiba: " + e.getMessage());
         } finally {
             if (in != null) try { in.close(); } catch (Exception ignored) { }
         }
     }
 
+    /** A teljes fájl mérete — a lejátszóhoz és a szeleteléshez. */
     @PluginMethod
     public void size(PluginCall call) {
         String uri = call.getString("uri");
@@ -237,13 +247,13 @@ public class MappaPlugin extends Plugin {
             r.put("size", meret);
             call.resolve(r);
         } catch (Exception e) {
-            call.reject("meret nem olvashato: " + e.getMessage());
+            call.reject("méret nem olvasható: " + e.getMessage());
         } finally {
             if (c != null) try { c.close(); } catch (Exception ignored) { }
         }
     }
 
-    /* ---------- nativ HTTP: az RSS-hez, CORS nelkul ---------- */
+    /* ---------- natív HTTP: az RSS-hez, CORS nélkül ---------- */
 
     @PluginMethod
     public void http(PluginCall call) {
@@ -268,21 +278,21 @@ public class MappaPlugin extends Plugin {
                 while (in != null && (n = in.read(buf)) > 0) {
                     bo.write(buf, 0, n);
                     ossz += n;
-                    if (ossz > 8L * 1024 * 1024) break;
+                    if (ossz > 8L * 1024 * 1024) break;      /* feed-XML sosem ekkora */
                 }
                 JSObject r = new JSObject();
                 r.put("status", kod);
                 r.put("text", bo.toString("UTF-8"));
                 call.resolve(r);
             } catch (Exception e) {
-                call.reject("halozati hiba: " + e.getMessage());
+                call.reject("hálózati hiba: " + e.getMessage());
             } finally {
                 if (c != null) c.disconnect();
             }
         }).start();
     }
 
-    /* ---------- epizod letoltese EGYENESEN a mappaba ---------- */
+    /* ---------- epizód letöltése EGYENESEN a mappába ---------- */
 
     @PluginMethod
     public void download(PluginCall call) {
@@ -290,7 +300,7 @@ public class MappaPlugin extends Plugin {
         final String nev = call.getString("name", "epizod.mp3");
         if (cim == null) { call.reject("nincs url"); return; }
         final String treeS = getContext().getSharedPreferences(PREF, 0).getString(KEY_TREE, null);
-        if (treeS == null) { call.reject("nincs kijelolt mappa"); return; }
+        if (treeS == null) { call.reject("nincs kijelölt mappa"); return; }
         new Thread(() -> {
             HttpURLConnection c = null;
             OutputStream os = null;
@@ -301,7 +311,7 @@ public class MappaPlugin extends Plugin {
                         tree, DocumentsContract.getTreeDocumentId(tree));
                 Uri cel = DocumentsContract.createDocument(
                         getContext().getContentResolver(), dir, "audio/mpeg", nev);
-                if (cel == null) { call.reject("nem sikerult letrehozni a fajlt a mappaban"); return; }
+                if (cel == null) { call.reject("nem sikerült létrehozni a fájlt a mappában"); return; }
                 URL u = new URL(cim);
                 c = (HttpURLConnection) u.openConnection();
                 c.setInstanceFollowRedirects(true);
@@ -333,7 +343,7 @@ public class MappaPlugin extends Plugin {
                 r.put("size", ossz);
                 call.resolve(r);
             } catch (Exception e) {
-                call.reject("letoltesi hiba: " + e.getMessage());
+                call.reject("letöltési hiba: " + e.getMessage());
             } finally {
                 try { if (os != null) os.close(); } catch (Exception ignored) { }
                 try { if (in != null) in.close(); } catch (Exception ignored) { }
@@ -342,12 +352,14 @@ public class MappaPlugin extends Plugin {
         }).start();
     }
 
+    /* ---------- segéd ---------- */
+
     private String szepNev(Uri tree) {
         try {
             String id = DocumentsContract.getTreeDocumentId(tree);
             int k = id.lastIndexOf(':');
             String p = (k >= 0) ? id.substring(k + 1) : id;
-            if (p.isEmpty()) return "belso tarolo";
+            if (p.isEmpty()) return "belső tároló";
             int s = p.lastIndexOf('/');
             return (s >= 0) ? p.substring(s + 1) : p;
         } catch (Exception e) {

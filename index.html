@@ -463,6 +463,36 @@ body.breath .hs.cur:after{content:'⋯';position:absolute;right:12px;bottom:4px;
   font-family:var(--mono);font-size:var(--t3);color:var(--gold);
   animation:bpulse 1.1s ease infinite}
 @keyframes bpulse{0%,100%{opacity:.25}50%{opacity:.9}}
+/* v65: a kibontott lista részei jól láthatóan a listához tartoznak */
+.lgroup{grid-column:1/-1;border:1px solid var(--gold-dim,rgba(212,168,83,.35));
+  border-radius:var(--r2);padding:var(--sp3);margin:0 0 var(--sp3);
+  background:rgba(212,168,83,.045)}
+.lgcap{display:flex;align-items:center;justify-content:space-between;gap:var(--sp2);
+  font-family:var(--mono);font-size:var(--t1);color:var(--gold);
+  letter-spacing:.06em;text-transform:uppercase;margin-bottom:var(--sp3)}
+.lgrack{display:grid;grid-template-columns:1fr 1fr 1fr;gap:var(--sp3)}
+@media (max-width:420px){ .lgrack{grid-template-columns:1fr 1fr} }
+/* v64: műsor-csempék */
+#showTog{cursor:pointer}
+#showList{display:grid;grid-template-columns:1fr 1fr;gap:var(--sp2)}
+@media (max-width:520px){ #showList{grid-template-columns:1fr} }
+.shTile{padding:11px 13px;border:1px solid var(--line);border-radius:var(--r1);
+  background:rgba(18,16,26,.55);cursor:pointer;min-height:56px}
+.shTile:active{background:rgba(28,24,40,.85)}
+.shN{font-size:var(--t2);color:var(--txt);margin-bottom:3px}
+.shK{font-family:var(--mono);font-size:var(--t1);color:var(--faint);line-height:1.4}
+/* v63: mappa-lista */
+#folderTog{cursor:pointer}
+.fRow{display:flex;align-items:center;gap:10px;padding:9px 11px;border:1px solid var(--line);
+  border-radius:var(--r1);margin-bottom:var(--sp2);cursor:pointer;background:rgba(18,16,26,.55);
+  min-height:46px}
+.fRow:active{background:rgba(28,24,40,.8)}
+.fRow .fn{flex:1;min-width:0;font-size:var(--t2);color:var(--txt);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fRow .fm{font-family:var(--mono);font-size:var(--t1);color:var(--faint);flex:none}
+.fRow .fd{font-family:var(--mono);font-size:var(--t1);color:var(--gold);flex:none}
+.fGrp{font-family:var(--mono);font-size:var(--t1);color:var(--faint);
+  letter-spacing:.08em;text-transform:uppercase;margin:var(--sp3) 0 var(--sp2)}
 /* v58: borító-miniatűr a lap-sorokban (hosszú listák) */
 .btn.hasThumb{display:flex;align-items:center;gap:10px;text-align:left}
 .btn.hasThumb .thumb{width:44px;height:44px;border-radius:8px;object-fit:cover;
@@ -585,6 +615,36 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
          amit ritkán (behúzás) utána, amit egyszer (kulcs-beállítás) a végén. -->
     <div class="lib" id="lib"></div>
 
+    <!-- v64: MŰSOROK — kedvenc feedek, egy koppintással -->
+    <div class="card" id="showCard">
+      <h3 id="showTog">Műsorok<em>koppints a nevére: feljönnek a részek</em></h3>
+      <div id="showBody">
+        <div class="row" style="margin-bottom:var(--sp2)">
+          <input type="text" id="showFind" placeholder="keresés a műsorok között"
+            spellcheck="false" style="flex:1;min-width:0">
+          <label class="mini" style="display:flex;align-items:center;gap:6px;cursor:pointer">
+            <input type="checkbox" id="showOnlyDrama"> hangjáték
+          </label>
+        </div>
+        <div id="showList"></div>
+      </div>
+    </div>
+    <!-- v63: PODCAST-MAPPA — csak a natív appban (APK) látszik -->
+    <div class="card hid" id="folderCard">
+      <h3 id="folderTog">Podcast-mappa<em>a fájlok ott maradnak, ahol vannak</em></h3>
+      <div id="folderBody">
+        <div class="row" style="margin-bottom:var(--sp2)">
+          <button class="mini" id="folderPick">mappa kijelölése</button>
+          <button class="mini" id="folderScan">újraolvasás</button>
+          <button class="mini" id="folderForget">mappa elfelejtése</button>
+        </div>
+        <div class="note" id="folderInfo">Jelöld ki a podcast-mappádat: onnantól a
+          benne lévő hangfájlok itt jelennek meg, és egy koppintással megnyithatók —
+          behúzás és másolás nélkül. A mappát a rendszer választója engedélyezi,
+          és a jog újraindítás után is megmarad.</div>
+        <div id="folderList" style="margin-top:var(--sp3)"></div>
+      </div>
+    </div>
     <!-- v56: a behúzás RITKA művelet, mégis a könyvtár alsó felét foglalta —
          telefonon összecsukva indul (egy sor), a címre koppintva nyílik;
          asztali gépen, ahol tényleg van egérrel húzás, nyitva marad. -->
@@ -924,7 +984,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v62';
+const APP_VER='v66';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -1149,6 +1209,72 @@ const txtPut=r=>dbOp('txt','readwrite',st=>st.put(r));
 const txtGet=id=>dbOp('txt','readonly',st=>st.get(id));
 const txtAll=()=>dbOp('txt','readonly',st=>st.getAll()).then(r=>r||[]);
 const txtDel=id=>dbOp('txt','readwrite',st=>st.delete(id));
+/* ======== v63: PODCAST-MAPPA (natív app) ========
+   Androidon a böngészőnek nincs könyvtárválasztója, ezért a webapp eddig
+   mindent a saját tárolójába másolt — dupla tárhely, és minden hangfájlt
+   kézzel kellett behúzni. A natív burokban (APK) viszont van: a rendszer
+   könyvtárválasztójával EGYSZER kijelölöd a podcast-mappádat, az app tartós
+   jogot kap rá, és onnantól a könyvtár = a mappa tartalma. A fájl ott marad,
+   ahol van.
+
+   A trükk, amitől a felismerés egy sor változtatás nélkül működik: a natív
+   oldal a mappa fájljait localhoston szolgálja ki Range-fejléccel. Így az
+   <audio> KÖZVETLENÜL streamel (egy nyolcórás m4b-t nem kell betölteni), a
+   `slice()` pedig valódi Blobot ad — a mp4/mp3/wav/adts bontók és a szeletelő
+   ugyanazt látják, mint egy behúzott fájlnál. */
+const NATIV=!!(window.Capacitor&&window.Capacitor.isNativePlatform&&
+               window.Capacitor.isNativePlatform());
+const MAPPA=(window.Capacitor&&window.Capacitor.Plugins&&window.Capacitor.Plugins.Mappa)||null;
+let SRV=null;                               /* {base,token} */
+async function srvReady(){
+  if(!MAPPA) return null;
+  if(SRV) return SRV;
+  try{ SRV=await MAPPA.serve(); log('mappa-kiszolgáló:',SRV.base) }
+  catch(e){ log('mappa-kiszolgáló nem indult:',e); SRV=null }
+  return SRV;
+}
+const safUrl=(uri)=>SRV?(SRV.base+'?t='+encodeURIComponent(SRV.token)+
+  '&uri='+encodeURIComponent(uri)):null;
+
+/* File-szerű objektum a mappában lévő fájlhoz. A `slice()` VALÓDI Blobot ad
+   (Range-kéréssel), tehát mindenhol behelyettesíthető egy File helyére. */
+function safFile(f){
+  const url=safUrl(f.uri);
+  const o={
+    name:f.name, size:+f.size||0, type:f.mime||'', saf:f.uri, url:url,
+    folder:f.folder||'', lastModified:+f.mtime||Date.now(),
+    slice(a,b){
+      const s=Math.max(0,a|0), e=(b==null?o.size:Math.min(o.size,b|0));
+      return {
+        size:Math.max(0,e-s), type:o.type,
+        async arrayBuffer(){
+          const r=await fetch(url,{headers:{Range:'bytes='+s+'-'+(e-1)}});
+          if(!r.ok&&r.status!==206&&r.status!==200)
+            throw new Error('a mappából nem olvasható ('+r.status+')');
+          return await r.arrayBuffer();
+        },
+        async blob(){
+          const r=await fetch(url,{headers:{Range:'bytes='+s+'-'+(e-1)}});
+          if(!r.ok&&r.status!==206&&r.status!==200)
+            throw new Error('a mappából nem olvasható ('+r.status+')');
+          return await r.blob();
+        }
+      };
+    }
+  };
+  return o;
+}
+/* A szeletelő néha Blob-ot épít a részekből — ez a segéd valódi Blobbá alakít
+   akkor is, ha mappa-proxyt kapott. (Külön név: az asBlob már létezik és
+   szinkron, nyers bájtokhoz — azt nem bántjuk.) */
+async function safBlob(x){
+  if(!x) return x;
+  if(x instanceof Blob) return x;
+  if(typeof x.blob==='function') return await x.blob();
+  if(typeof x.arrayBuffer==='function') return new Blob([await x.arrayBuffer()],{type:x.type||''});
+  return x;
+}
+
 const mediaId=f=>(f.name||'hang').replace(/\.[^.]+$/,'').replace(/\s+/g,' ').trim().slice(0,70)+'|'+f.size;
 
 /* Nem minden „borító" kép. Az ID3 APIC keret tarthat a kép helyett CÍMET is
@@ -1409,7 +1535,7 @@ async function cutMp4(M,t0,t1){
   }
   const chunks=[];
   let dataLen=0;
-  for(const p of parts){ chunks.push(M.file.slice(p.start,p.end)); dataLen+=p.end-p.start }
+  for(const p of parts){ chunks.push(await safBlob(M.file.slice(p.start,p.end))); dataLen+=p.end-p.start }
   const head=buildM4A(M.stsdRaw,M.ts,deltas,sizes,dataLen);
   return {blob:new Blob([head,...chunks],{type:'audio/mp4'}), name:'r.m4a',
           t0:M.time[i0]/M.ts, t1:M.time[i1]/M.ts};
@@ -1475,7 +1601,7 @@ async function cutMp3(M,t0,t1){
   if(i0>0&&M.times[i0]>t0) i0--;
   if(i1<=i0) i1=Math.min(M.n,i0+1);
   const a=M.fr[i0].o, b=M.fr[i1-1].o+M.fr[i1-1].len;
-  return {blob:new Blob([M.file.slice(a,b)],{type:'audio/mpeg'}), name:'r.mp3',
+  return {blob:new Blob([await safBlob(M.file.slice(a,b))],{type:'audio/mpeg'}), name:'r.mp3',
           t0:M.times[i0], t1:M.times[i1]};
 }
 
@@ -1502,7 +1628,7 @@ async function cutWav(M,t0,t1){
   const len=b-a;
   const hdr=M.hdr.slice(); const w32=(u,i,v)=>{u[i]=v&255;u[i+1]=v>>8&255;u[i+2]=v>>16&255;u[i+3]=v>>>24&255};
   w32(hdr,4,len+hdr.length-8); w32(hdr,hdr.length-4,len);
-  return {blob:new Blob([hdr,M.file.slice(M.dataAt+a,M.dataAt+b)],{type:'audio/wav'}),name:'r.wav',
+  return {blob:new Blob([hdr,await safBlob(M.file.slice(M.dataAt+a,M.dataAt+b))],{type:'audio/wav'}),name:'r.wav',
           t0:a/M.fmt.byteRate,t1:b/M.fmt.byteRate};
 }
 
@@ -1579,7 +1705,7 @@ async function cutAdts(M,t0,t1){
   if(i0>0&&M.times[i0]>t0) i0--;
   if(i1<=i0) i1=Math.min(M.n,i0+1);
   const a=M.fr[i0].o, b=M.fr[i1-1].o+M.fr[i1-1].len;
-  return {blob:new Blob([M.file.slice(a,b)],{type:'audio/aac'}),name:'r.aac',
+  return {blob:new Blob([await safBlob(M.file.slice(a,b))],{type:'audio/aac'}),name:'r.aac',
           t0:M.times[i0],t1:M.times[i1]};
 }
 
@@ -1632,7 +1758,8 @@ async function cut(M,t0,t1){
   if(M.kind==='mp3') return cutMp3(M,t0,t1);
   if(M.kind==='wav') return cutWav(M,t0,t1);
   if(M.kind==='adts') return cutAdts(M,t0,t1);
-  return {blob:M.file,name:M.file.name||'r.audio',t0:0,t1:M.dur||t1};
+  return {blob:await safBlob(M.file.slice(0,M.file.size)),
+          name:M.file.name||'r.audio',t0:0,t1:M.dur||t1};
 }
 </script>
 <script>
@@ -1877,14 +2004,38 @@ const SYS_PAIRS='You receive numbered items, each an English sentence from an au
  '{"w":[["surface","lemma","pos","hungarian","suffixed"],...],'+
  '"c":[["english clause","magyar szakasz"],...]}. No markdown fence, no commentary.';
 
+/* v66: JSON-válasz kibontása ÉRTELMES hibaüzenettel.
+   A naplóban tucatszám állt a „fordító (claude): Unexpected end of JSON input" —
+   ami félrevezető volt: nem a JSON csonkult, hanem a válaszban EGYÁLTALÁN nem
+   volt tömb (a kivágás ilyenkor üres sztringet ad, azon a JSON.parse pont ezt a
+   hibát dobja). Most megnevezzük a valódi okot, és a válasz szélét a naplóba
+   tesszük, hogy egy pillantásból látszódjon, mit adott a modell. */
+function jsonTomb(raw,honnan){
+  const t=String(raw||'').replace(/```json|```/g,'').trim();
+  if(!t) throw new Error(honnan+': a modell üres választ adott');
+  const a=t.indexOf('['), b=t.lastIndexOf(']');
+  if(a<0){
+    log(honnan+' — a válasz nem tömb, első 200 karakter:',t.slice(0,200));
+    throw new Error(honnan+': a modell nem JSON-tömböt adott');
+  }
+  if(b<a){
+    log(honnan+' — csonka válasz, vége:',t.slice(-120));
+    throw new Error(honnan+': a válasz félbeszakadt (túl hosszú köteg)');
+  }
+  try{ return JSON.parse(t.slice(a,b+1)) }
+  catch(e){
+    log(honnan+' — hibás JSON:',String(e.message),'| vége:',t.slice(-120));
+    throw new Error(honnan+': a válasz JSON-je hibás');
+  }
+}
+
 /* items: [{en, hu}] → [{w:[...], c:[...]}] */
 async function llmPairs(items,eng){
   const e=eng||CFG.tr;
   const user=items.map((it,i)=>(i+1)+'. '+it.en+' ||| '+(it.hu||'')).join('\n');
-  const raw=(e==='oai'?await oaiCall(SYS_PAIRS,user,2400):await claudeCall(SYS_PAIRS,user,2400))
-    .replace(/```json|```/g,'').trim();
-  const arr=JSON.parse(raw.slice(raw.indexOf('['),raw.lastIndexOf(']')+1));
-  if(!Array.isArray(arr)||arr.length!==items.length) throw new Error('nem illeszkedő válasz');
+  const raw=(e==='oai'?await oaiCall(SYS_PAIRS,user,2400):await claudeCall(SYS_PAIRS,user,2400));
+  const arr=jsonTomb(raw,'szópárok');
+  if(!Array.isArray(arr)||arr.length!==items.length) throw new Error('szópárok: nem illeszkedő válasz');
   return arr.map(x=>{
     if(!x||typeof x!=='object') return {w:[],c:[]};
     const w=Array.isArray(x.w)?x.w.filter(r=>Array.isArray(r)&&r.length>=5).slice(0,6):[];
@@ -1900,16 +2051,31 @@ async function llmPairs(items,eng){
 async function llmLines(lines,eng){
   const e=eng||CFG.tr;
   const user=lines.map((l,i)=>(i+1)+'. '+l).join('\n');
-  /* v57: a válaszkeret a bemenethez skálázódik. A v53 óta az egység TELJES
-     mondat, és 10 hosszú mondat magyarja nem fért az 1400-as alapkeretbe —
-     a JSON csonkult, az egész köteg kárba veszett. A magyar ~0,45 token/karakter,
-     kétszeres ráhagyással és JSON-terheléssel: */
-  const mx=Math.min(4000,Math.max(800,Math.round(user.length*0.9)+300));
-  const raw=(e==='oai'?await oaiCall(SYS_TR,user,mx):await claudeCall(SYS_TR,user,mx))
-    .replace(/```json|```/g,'').trim();
-  const arr=JSON.parse(raw.slice(raw.indexOf('['),raw.lastIndexOf(']')+1));
-  if(!Array.isArray(arr)||arr.length!==lines.length) throw new Error('nem illeszkedő válasz');
-  return arr.map(x=>String(x).trim());
+  /* v57: a válaszkeret a bemenethez skálázódik; v66: bővebb ráhagyás, mert a
+     magyar tokenizálása jóval drágább az angolnál (rövid szótagok, ékezetek) */
+  const mx=Math.min(6000,Math.max(1000,Math.round(user.length*1.6)+400));
+  const raw=(e==='oai'?await oaiCall(SYS_TR,user,mx):await claudeCall(SYS_TR,user,mx));
+  const arr=jsonTomb(raw,'fordító');
+  if(!Array.isArray(arr)) throw new Error('fordító: a válasz nem lista');
+  if(arr.length!==lines.length)
+    throw new Error('fordító: '+lines.length+' mondatra '+arr.length+' fordítás jött');
+  return arr.map(x=>String(x||'').trim());
+}
+
+/* v66: FELEZŐ ÚJRAPRÓBÁLKOZÁS. Ha egy köteg elhasal (csonka válasz, hibás JSON,
+   nem illeszkedő elemszám), eddig az EGÉSZ köteg kárba veszett — tíz mondat
+   fordítása bukott egy miatt, és a naplóban ezért állt tucatszám a hiba. Most
+   kettévágjuk és külön próbáljuk: a hibás mondat egyedül marad, a többi átmegy. */
+async function llmLinesSafe(lines,eng){
+  try{ return await llmLines(lines,eng) }
+  catch(e){
+    if(lines.length<=1){ log('fordító (1 mondat):',e); return [''] }
+    log('fordító: köteg felezése ('+lines.length+' mondat) —',String(e.message).slice(0,90));
+    const k=Math.ceil(lines.length/2);
+    const a=await llmLinesSafe(lines.slice(0,k),eng);
+    const b=await llmLinesSafe(lines.slice(k),eng);
+    return a.concat(b);
+  }
 }
 /* Egy köteg lefordítása. A kiválasztott motor ADATHATÁR is: ha a Claude vagy az
    egyéb API hívása elhasal, a szöveg NEM megy át csendben az ingyenes Google-
@@ -1924,7 +2090,7 @@ async function trBatch(lines){
     if(CFG.tr!=='free'){
       /* v52: a fordítás MINDIG a tiszta SYS_TR-en fut — a szópárok külön
          menetben készülnek (fillPairs), a kész magyarhoz horgonyozva */
-      try{ got=await llmLines(todo) }
+      try{ got=await llmLinesSafe(todo) }
       catch(e){ log('fordító ('+CFG.tr+'):',e); return lines.map(l=>cache[l]||'') }
     }else{
       try{ got=await gtxLines(todo) }
@@ -4538,6 +4704,258 @@ $('pPlay').onclick=()=>{ breathCancel(false);
 $('pPrev').onclick=()=>{ breathCancel(false); gotoSen(CUR<=0?0:CUR-1) };
 $('pNext').onclick=()=>{ breathCancel(false); gotoSen(CUR+1) };
 const RATES=[0.7,0.85,1,1.15,1.3];
+/* ======== v64: MŰSOROK — kedvenc feedek egy koppintással ========
+   A kérés: „rányomok a nevükre, feljönnek a részek, és amelyiket akarom,
+   elindítom úgy, hogy egyből a fordítós oldalamra kerül." Pontosan ez:
+   csempe → részek lapja → koppintás egy részre → letöltés (a natív appban
+   EGYENESEN a podcast-mappába) → megnyitás → a feldolgozás indul.
+
+   Ahol tudjuk a feed pontos címét, azt használjuk; a többinél a nevet az
+   Apple nyilvános podcast-katalógusából keressük ki futásidőben (az adja a
+   feed címét is). A natív HTTP miatt nincs CORS-probléma. */
+const SHOWS=[
+{i:"why",n:"The Why Files",k:"UFO, idegenek, összeesküvés · egy narrátor",u:"https://anchor.fm/s/89358408/podcast/rss"},
+{i:"ballen",n:"MrBallen Podcast",k:"horror, rejtély, eltűnések · egy narrátor",q:"MrBallen Strange Dark Mysterious Stories"},
+{i:"nasa",n:"Houston We Have a Podcast",k:"űrkutatás · NASA, hivatalos",q:"Houston We Have a Podcast NASA"},
+{i:"startalk",n:"StarTalk Radio",k:"űr és tudomány, poénnal · Neil deGrasse Tyson",q:"StarTalk Radio"},
+{i:"history",n:"The Rest Is History",k:"történelem, humor · brit angol",q:"The Rest Is History Goalhanger"},
+{i:"casefile",n:"Casefile True Crime",k:"true crime · egy narrátor, tiszta beszéd",u:"https://feeds.acast.com/public/shows/679acff465f74095106abfaa"},
+{i:"rotten",n:"Rotten Mango",k:"true crime, rejtélyek · Stephanie Soo",u:"https://feeds.simplecast.com/6Qp23t6h"},
+{i:"lore",n:"Lore",k:"folklór, horror, babona · egy narrátor",u:"https://feeds.libsyn.com/65267/rss"},
+{i:"lpotl",n:"Last Podcast on the Left",k:"horror, kultuszok, UFO · poénnal",u:"https://feeds.simplecast.com/dCXMIpJz"},
+{i:"morbid",n:"Morbid",k:"true crime, poénnal · Wondery, nehezen elérhető",q:"Morbid podcast true crime"},
+{i:"mfm",n:"My Favorite Murder",k:"true crime, poénnal · két házigazda",u:"https://www.omnycontent.com/d/playlist/e73c998e-6e60-432f-8610-ae210140c5b1/bdde8bb3-169d-43b1-91d3-b24c0047969c/f450d41f-16bc-4ecd-8f6c-b24c004796e2/podcast.rss"},
+{i:"melrobbins",n:"The Mel Robbins Podcast",k:"önfejlesztés, tanácsok · egy házigazda",u:"https://feeds.simplecast.com/UCwaTX1J"},
+{i:"conan",n:"Conan O’Brien Needs a Friend",k:"humor, interjú · tiszta stúdióhang",q:"Conan OBrien Needs a Friend"},
+{i:"dateline",n:"Dateline NBC",k:"true crime, riport · lassú, tiszta beszéd",q:"Dateline NBC"},
+{i:"sysk",n:"Stuff You Should Know",k:"ismeretterjesztés lazán",q:"Stuff You Should Know"},
+{i:"radiolab",n:"Radiolab",k:"tudomány, hangjátékszerű · nehezebb fül",q:"Radiolab WNYC"},
+{i:"jre",n:"The Joe Rogan Experience",k:"hosszú beszélgetések · mindenről",u:"https://feeds.megaphone.fm/GLT1412515089"},
+{i:"doac",n:"The Diary Of A CEO",k:"vállalkozás, interjú",u:"https://rss2.flightcast.com/xmsftuzjjykcmqwolaqn6mdn"},
+{i:"pmoney",n:"Planet Money",k:"gazdaság, rövid történetek · NPR",u:"https://feeds.npr.org/510289/podcast.xml"},
+{i:"nightvale",n:"Welcome to Night Vale",k:"szürreális kisvárosi rádióadás · idegenek, humor, horror",g:1,u:"https://feeds.nightvalepresents.com/welcometonightvalepodcast"},
+{i:"magnus",n:"The Magnus Archives",k:"horror · epizódonként egy vallomás, egy narrátor",g:1,q:"The Magnus Archives Rusty Quill"},
+{i:"wolf359",n:"Wolf 359",k:"sci-fi vígjáték egy űrállomáson",g:1,q:"Wolf 359 podcast"},
+{i:"oldgods",n:"Old Gods of Appalachia",k:"folk horror · lassú, mély narráció",g:1,q:"Old Gods of Appalachia"},
+{i:"whitevault",n:"The White Vault",k:"horror · sarkvidéki expedíció felvételei",g:1,q:"The White Vault"},
+{i:"siltverses",n:"The Silt Verses",k:"horror · vallás és folyók",g:1,q:"The Silt Verses"},
+{i:"malevolent",n:"Malevolent",k:"kozmikus horror · nyomozó és a démon",g:1,q:"Malevolent podcast"},
+{i:"blacktapes",n:"The Black Tapes",k:"áldokumentum · paranormális nyomozás",g:1,q:"The Black Tapes"},
+{i:"limetown",n:"Limetown",k:"áldokumentum · eltűnt egy egész város",g:1,q:"Limetown"},
+{i:"werealive",n:"We're Alive",k:"zombiapokalipszis · teljes hangjáték",g:1,q:"We're Alive zombie"},
+{i:"zyxx",n:"Mission to Zyxx",k:"improvizált sci-fi komédia · űrhajósok",g:1,q:"Mission to Zyxx"},
+{i:"levar",n:"LeVar Burton Reads",k:"sci-fi novellák felolvasva · egy hang",g:1,q:"LeVar Burton Reads"},
+{i:"escapepod",n:"Escape Pod",k:"sci-fi novellák hetente",g:1,q:"Escape Pod science fiction"},
+{i:"thetruth",n:"The Truth",k:"rövid hangjátékok · 20-30 perc",g:1,q:"The Truth podcast short"},
+{i:"midburger",n:"Midnight Burger",k:"sci-fi vígjáték · időutazó büfé, meleg hangulat · nagyon tiszta hang",g:1,u:"https://feeds.megaphone.fm/midnightburger"},
+{i:"woodenovercoats",n:"Wooden Overcoats",k:"brit szitkom · rivális temetkezők egy szigeten · lassú, érthető beszéd",g:1,q:"Wooden Overcoats"},
+{i:"amelia",n:"The Amelia Project",k:"fekete komédia · halált hamisító ügynökség · epizódonként önálló",g:1,q:"The Amelia Project"},
+{i:"victoriocity",n:"Victoriocity",k:"viktoriánus London, krimi + humor · történelmi hangulat",g:1,q:"Victoriocity"},
+{i:"penumbra",n:"The Penumbra Podcast",k:"antológia · western, noir, sci-fi · színészi hang",g:1,q:"The Penumbra Podcast"},
+{i:"unwell",n:"Unwell, a Midwestern Gothic Mystery",k:"kisvárosi élet, lassú rejtély · „slice of life\\u201d, nem horror",g:1,q:"Unwell Midwestern Gothic"},
+{i:"greaterboston",n:"Greater Boston",k:"városi élet, furcsaságok · sok szereplő, irodalmi szöveg",g:1,q:"Greater Boston podcast"},
+{i:"kalila",n:"Kalila Stormfire's Economical Magick Services",k:"hétköznapi mágia egy lakótelepen · nyugodt, kedves",g:1,q:"Kalila Stormfire"},
+{i:"camlann",n:"Camlann",k:"összeomlás utáni Wales · lassú, csendes, dalokkal",g:1,q:"Camlann podcast"},
+{i:"moonbase",n:"Moonbase Theta, Out",k:"űrbázis-leszerelés · levelek és üzenetek, sok monológ",g:1,q:"Moonbase Theta Out"},
+{i:"girlinspace",n:"Girl In Space",k:"egy lány egyedül egy hajón · végig narrálva, könnyen követhető",g:1,q:"Girl In Space"},
+{i:"sayer",n:"SAYER",k:"mesterséges intelligencia beszél hozzád · egy hang, lassú tempó",g:1,q:"SAYER podcast"},
+{i:"arspara",n:"ars PARADOXICA",k:"időutazás a negyvenes évekbe · történelem és fizika",g:1,q:"ars PARADOXICA"},
+{i:"elevator",n:"Someone Dies In This Elevator",k:"vígjáték-antológia · egy lift, minden rész más",g:1,q:"Someone Dies In This Elevator"},
+{i:"deathbydying",n:"Death by Dying",k:"komikus noir egy kisvárosi halálozási nyilvántartóval",g:1,q:"Death by Dying"},
+{i:"fireside",n:"Fireside Mystery Theatre",k:"régi rádiószínház modern kiadásban · élő zene, teljes szereposztás",g:1,q:"Fireside Mystery Theatre"},
+{i:"magictavern",n:"Hello From The Magic Tavern",k:"improvizált fantasy-humor · beszélgetés, nem hangjáték",g:1,q:"Hello From The Magic Tavern"},
+{i:"withinwires",n:"Within the Wires",k:"kazettás „útmutatók\\u201d egy másik világból · egy hang, nagyon lassú",g:1,q:"Within the Wires"},
+{i:"vasthorizon",n:"VAST Horizon",k:"sci-fi túlélés · agronómus egy üres űrhajón",g:1,q:"VAST Horizon podcast"},
+{i:"janus",n:"Janus Descending",k:"űr-horror · két idősík, előre és visszafelé",g:1,q:"Janus Descending"},
+{i:"eos10",n:"EOS 10",k:"vígjáték · orvosok egy űrállomáson",g:1,q:"EOS 10 podcast"},
+{i:"spacejunk",n:"We Fix Space Junk",k:"sci-fi humor · két javítómunkás a galaxisban",g:1,q:"We Fix Space Junk"},
+{i:"hyacinth",n:"The Hyacinth Disaster",k:"hard sci-fi · aszteroida-bányászok, rövid sorozat",g:1,q:"The Hyacinth Disaster"},
+{i:"relativity",n:"Relativity",k:"sci-fi · űrhajós és az irányítóközpont",g:1,q:"Relativity podcast fiction"},
+{i:"iris",n:"The Strange Case of Starship Iris",k:"sci-fi kaland · csempészhajó és egy tudós",g:1,q:"Starship Iris"},
+{i:"starsbones",n:"Among the Stars and Bones",k:"sci-fi · xeno-archeológusok egy holt civilizációnál",g:1,q:"Among the Stars and Bones"},
+{i:"stealstars",n:"Steal the Stars",k:"thriller · lezuhant UFO egy katonai bázison",g:1,q:"Steal the Stars"},
+{i:"decatapes",n:"The Deca Tapes",k:"pszichológiai rejtvény · tíz ember hangfelvételei",g:1,q:"The Deca Tapes"},
+{i:"ostium",n:"Ostium",k:"rejtély · ajtók egy másik időbe",g:1,q:"Ostium podcast"},
+{i:"archive81",n:"Archive 81",k:"szürreális found-footage horror · kazetta-restaurálás",g:1,q:"Archive 81 podcast"},
+{i:"alicedead",n:"Alice Isn't Dead",k:"road-horror · kamionsofőr keresi a feleségét",g:1,q:"Alice Isn't Dead"},
+{i:"videopalace",n:"Video Palace",k:"horror · egy fehér VHS-kazetta nyomában",g:1,q:"Video Palace podcast"},
+{i:"eskew",n:"I Am In Eskew",k:"pszichológiai horror · változó város, brit angol",g:1,q:"I Am In Eskew"},
+{i:"knifepoint",n:"Knifepoint Horror",k:"minimalista horror · egyetlen narrátor",g:1,q:"Knifepoint Horror"},
+{i:"leftright",n:"The Left Right Game",k:"rejtély · konvoj egy városi legenda nyomában",g:1,q:"The Left Right Game"},
+{i:"passenger",n:"Passenger List",k:"thriller · eltűnt utasszállító",g:1,q:"Passenger List podcast"},
+{i:"rabbits",n:"Rabbits",k:"rejtély · titkos valóság-játék",g:1,q:"Rabbits podcast"},
+{i:"borrasca",n:"Borrasca",k:"thriller · kisvárosi eltűnések",g:1,q:"Borrasca podcast"},
+{i:"carrier",n:"Carrier",k:"thriller · kamionsofőr és egy lezárt rakomány",g:1,q:"Carrier podcast QCode"}
+];
+/* a feed címe: vagy tudjuk, vagy az Apple-katalógusból kikeressük */
+async function showFeedUrl(sh){
+  if(sh.u) return sh.u;
+  if(SHOWURL[sh.i]) return SHOWURL[sh.i];
+  const q='https://itunes.apple.com/search?media=podcast&entity=podcast&limit=5&term='+
+    encodeURIComponent(sh.q||sh.n);
+  let txt=null;
+  if(MAPPA){ try{ const r=await MAPPA.http({url:q}); if(r&&r.status<400) txt=r.text }catch(e){} }
+  if(txt==null){ const r=await fetch(q); txt=await r.text() }
+  const d=JSON.parse(txt);
+  const nev=(sh.n||'').toLowerCase();
+  const tal=(d.results||[]).filter(x=>x.feedUrl);
+  if(!tal.length) throw new Error('nem találom a műsort a katalógusban');
+  const jo=tal.find(x=>String(x.collectionName||'').toLowerCase().includes(nev.slice(0,12)))||tal[0];
+  SHOWURL[sh.i]=jo.feedUrl;
+  try{ localStorage.setItem('showurl',JSON.stringify(SHOWURL)) }catch(e){}
+  return jo.feedUrl;
+}
+let SHOWURL={};
+try{ SHOWURL=JSON.parse(localStorage.getItem('showurl')||'{}') }catch(e){ SHOWURL={} }
+
+/* a műsor részei — lap, ahol egy koppintás elindítja a feldolgozást */
+async function showOpen(sh){
+  if(JOB.on||RT) return toast('előbb fejezd be a futó feldolgozást');
+  toast('epizódok betöltése: '+sh.n,2500);
+  let url,f;
+  try{
+    url=await showFeedUrl(sh);
+    f=await feedLoad(url,true);
+  }catch(e){
+    log('műsor betöltése:',e);
+    return sheet(sh.n,[{note:'Az epizódlista nem jött le: '+String(e.message).slice(0,150)},
+      {t:'próbálkozás újra',fn:()=>showOpen(sh)},
+      {t:'a feed címének megnyitása böngészőben',fn:()=>{ try{ open(url,'_blank') }catch(x){} }}]);
+  }
+  const it=(f.items||[]).slice(0,60);
+  if(!it.length) return toast('ez a feed most nem adott epizódot',4000);
+  /* melyik rész van már meg? (a mappában vagy a könyvtárban) */
+  let meglevo={};
+  try{ (await txtAll()).forEach(r=>{ meglevo[fdSafe(r.name)]=r }) }catch(e){}
+  const items=[{note:(f.title||sh.n)+' — '+it.length+' rész. Koppints egy részre: '+
+    (MAPPA?'letöltöm a podcast-mappába, megnyitom, és indul a feldolgozás.'
+          :'letöltöm és megnyitom.')}];
+  for(const e of it){
+    const kesz=meglevo[fdSafe(e.title)];
+    items.push({art:f.cover||null,
+      t:(kesz?'✓ ':'')+e.title+(e.dur?'  ·  '+e.dur:''),
+      fn:()=>{ closeSheet();
+        if(kesz) return openRecById(kesz.id);
+        feedGrab(e); }});
+  }
+  sheet(sh.n,items);
+}
+async function openRecById(id){
+  try{ const r=await txtGet(id); if(r) return openRec(r) }catch(e){ log('megnyitás azonosítóból:',e) }
+  toast('ez a felvétel már nincs a könyvtárban',4000);
+}
+/* a műsor-csempék kirakása */
+function showsDraw(){
+  const box=$('showList'); if(!box) return;
+  box.innerHTML='';
+  const csak=$('showOnlyDrama')&&$('showOnlyDrama').checked;
+  const q=($('showFind')&&$('showFind').value||'').trim().toLowerCase();
+  let n=0;
+  for(const sh of SHOWS){
+    if(csak&&!sh.g) continue;
+    if(q&&!(sh.n+' '+sh.k).toLowerCase().includes(q)) continue;
+    n++;
+    const el=document.createElement('div'); el.className='shTile';
+    const t=document.createElement('div'); t.className='shN'; t.textContent=sh.n;
+    const k=document.createElement('div'); k.className='shK'; k.textContent=sh.k;
+    el.appendChild(t); el.appendChild(k);
+    el.onclick=()=>showOpen(sh);
+    box.appendChild(el);
+  }
+  if(!n){ const e=document.createElement('div'); e.className='note';
+    e.textContent='nincs találat'; box.appendChild(e) }
+}
+
+/* ======== v63: a Podcast-mappa működése ========
+   A lista a mappa tartalma; a már feldolgozott fájlokat megjelöljük (a
+   felismert szöveg a készüléken marad, a hang a mappában). Koppintásra a
+   fájl megnyílik — a hang a localhost-kiszolgálón streamel. */
+let FOLDER=[];
+function folderShow(){
+  if(!NATIV||!MAPPA) return;                     /* webes böngészőben nincs */
+  $('folderCard').classList.remove('hid');
+}
+async function folderInit(){
+  if(!NATIV||!MAPPA) return;
+  folderShow();
+  await srvReady();
+  try{
+    const cur=await MAPPA.current();
+    if(cur&&cur.uri){ $('folderInfo').textContent='mappa: '+(cur.name||'kijelölve');
+      await folderScan(true) }
+  }catch(e){ log('mappa-állapot:',e) }
+}
+async function folderPick(){
+  try{
+    const r=await MAPPA.pick();
+    $('folderInfo').textContent='mappa: '+(r.name||'kijelölve');
+    toast('mappa kijelölve — beolvasom',3000);
+    await folderScan();
+  }catch(e){ log('mappa-kijelölés:',e); toast('nem sikerült kijelölni a mappát',4000) }
+}
+async function folderScan(csendben){
+  if(!MAPPA) return;
+  await srvReady();
+  try{
+    const r=await MAPPA.list();
+    FOLDER=(r.files||[]).sort((a,b)=>
+      String(a.folder||'').localeCompare(String(b.folder||''),'hu')||
+      String(a.name||'').localeCompare(String(b.name||''),'hu',{numeric:true}));
+    await folderDraw();
+    if(!csendben) toast(FOLDER.length+' hangfájl a mappában',3500);
+    log('mappa:',FOLDER.length,'hangfájl');
+  }catch(e){ log('mappa-olvasás:',e);
+    if(!csendben) toast('a mappa nem olvasható — jelöld ki újra',4500) }
+}
+async function folderDraw(){
+  const box=$('folderList'); box.innerHTML='';
+  if(!FOLDER.length){ return }
+  /* melyikhez van már szöveg? (a felvétel azonosítója névből+méretből áll) */
+  let kesz={};
+  try{ (await txtAll()).forEach(r=>{ kesz[r.id]={n:(r.sen||[]).length,pos:r.pos||0,dur:r.dur||0} }) }catch(e){}
+  let elozo=null;
+  for(const f of FOLDER){
+    if((f.folder||'')!==elozo){
+      elozo=f.folder||'';
+      if(elozo){ const g=document.createElement('div'); g.className='fGrp';
+        g.textContent=elozo; box.appendChild(g) }
+    }
+    const id=(f.name||'hang').replace(/\.[^.]+$/,'').replace(/\s+/g,' ').trim().slice(0,70)+'|'+f.size;
+    const k=kesz[id];
+    const row=document.createElement('div'); row.className='fRow';
+    const n=document.createElement('div'); n.className='fn';
+    n.textContent=(f.name||'').replace(/\.[^.]+$/,'');
+    const m=document.createElement('div'); m.className='fm'; m.textContent=fmtMB(f.size||0);
+    row.appendChild(n); row.appendChild(m);
+    if(k&&k.n){ const d=document.createElement('div'); d.className='fd';
+      d.textContent=(k.dur&&k.pos)?Math.round(k.pos/k.dur*100)+'%':'szöveg ✓';
+      row.appendChild(d) }
+    row.onclick=()=>folderOpen(f);
+    box.appendChild(row);
+  }
+}
+/* Megnyitás a mappából: nincs másolás, nincs behúzás. */
+async function folderOpen(f){
+  if(JOB.on||RT) return toast('előbb fejezd be a futó feldolgozást');
+  try{
+    await srvReady();
+    if(!SRV) return toast('a mappa-kiszolgáló nem indult el');
+    const file=safFile(f);
+    await addFile(file,{folder:true});
+  }catch(e){ log('mappa-megnyitás:',e);
+    toast('nem sikerült megnyitni: '+String(e.message).slice(0,110),6000) }
+}
+$('folderPick').onclick=folderPick;
+$('folderScan').onclick=()=>folderScan();
+$('folderForget').onclick=async()=>{
+  if(!confirm('Elfelejtsem a mappát? A fájlok és a felismert szövegek megmaradnak.')) return;
+  try{ await MAPPA.forget() }catch(e){}
+  FOLDER=[]; $('folderList').innerHTML='';
+  $('folderInfo').textContent='Jelöld ki a podcast-mappádat: onnantól a benne lévő '+
+    'hangfájlok itt jelennek meg, és egy koppintással megnyithatók.';
+};
+$('folderTog').onclick=()=>$('folderBody').classList.toggle('hid');
+
 /* v56: a motor/kulcs-blokk csak kérésre nyílik; kulcs nélkül (első beállítás)
    nyitva indul, hogy meglegyen az út */
 $('engTog').onclick=()=>{ $('engWrap').classList.toggle('hid') };
@@ -4545,6 +4963,14 @@ if(!CFG.asrKey) $('engWrap').classList.remove('hid');
 
 /* v56: a behúzó telefonon csukva indul — ritka művelet ne foglalja a könyvtárat */
 if(matchMedia('(hover:none)').matches) $('intake').classList.add('closed');
+/* v63: a Podcast-mappa csak a natív appban (APK) jelenik meg */
+addEventListener('load',()=>{ folderInit().catch(e=>log('mappa-indítás:',e)) });
+/* v64: műsorok */
+$('showTog').onclick=()=>$('showBody').classList.toggle('hid');
+$('showFind').addEventListener('input',showsDraw);
+$('showOnlyDrama').addEventListener('change',showsDraw);
+addEventListener('load',showsDraw);
+if(matchMedia('(hover:none)').matches) $('showBody').classList.add('hid');
 $('intakeTog').onclick=()=>$('intake').classList.toggle('closed');
 
 $('pRate').onclick=()=>{
@@ -4710,6 +5136,7 @@ async function openRec(rec,fileMaybe){
   }
   REC=rec; CUR=-1; loopA=loopB=null; MED=null;
   document.body.classList.add('playing');
+  libBtn&&libBtn();
   armBack&&armBack();     /* v61: a lejátszó is réteg — a vissza a könyvtárba lép */
   setHdrVar();
   setCover(rec);
@@ -4756,16 +5183,43 @@ async function openRec(rec,fileMaybe){
     if(!file){ const m=await medGet(rec.id).catch(()=>null); if(m&&m.blob) file=m.blob }
   }
   if(MURL){ URL.revokeObjectURL(MURL); MURL='' }
-  if(file){
+  if(file&&file.saf&&file.url){
+    /* v63: mappából streamelünk — nincs blob-URL, nincs memóriába olvasás,
+       a seek a Range-kéréseken keresztül működik (nyolcórás m4b is) */
+    A.src=file.url;
+    FILE=file;
+    if(rec.pos) A.currentTime=rec.pos;
+    if(nextGap(rec.done,0,rec.dur||1e9)) prepMedia().catch(e=>log('előkészítés:',e));
+  }else if(file){
     MURL=URL.createObjectURL(file); A.src=MURL;
     FILE=file;
     if(rec.pos) A.currentTime=rec.pos;
     /* a szeleteléshez a szerkezet is kell, de csak akkor, ha van mit feldolgozni */
     if(nextGap(rec.done,0,rec.dur||1e9)) prepMedia().catch(e=>log('előkészítés:',e));
   }else{
-    A.removeAttribute('src'); FILE=null;
-    log('nincs hang a tárolóban:',rec.id,'hasAudio='+(rec.hasAudio||0),'darab='+(rec.ach||0));
-    askAudio(rec);                       /* v62: a hiány helyén a megoldás */
+    /* v63: mappás felvétel — a hangot a mappából vesszük, ha még ott van */
+    let safOk=false;
+    if(rec.saf&&MAPPA){
+      try{
+        await srvReady();
+        const f=(FOLDER||[]).find(x=>x.uri===rec.saf);
+        const meret=f?f.size:(await MAPPA.size({uri:rec.saf})).size;
+        if(meret>0){
+          const sf=safFile({uri:rec.saf,name:(f&&f.name)||rec.name,size:meret,
+            mime:(f&&f.mime)||'',folder:(f&&f.folder)||'',mtime:Date.now()});
+          A.src=sf.url; FILE=sf;
+          if(rec.pos) A.currentTime=rec.pos;
+          if(nextGap(rec.done,0,rec.dur||1e9)) prepMedia().catch(e=>log('előkészítés:',e));
+          safOk=true;
+          log('hang a mappából:',rec.name);
+        }
+      }catch(e){ log('mappa-hang nem érhető el:',e) }
+    }
+    if(!safOk){
+      A.removeAttribute('src'); FILE=null;
+      log('nincs hang a tárolóban:',rec.id,'hasAudio='+(rec.hasAudio||0),'darab='+(rec.ach||0));
+      askAudio(rec);                     /* v62: a hiány helyén a megoldás */
+    }
   }
   renderKara(false); renderHu(true); drawSeek();
 }
@@ -4803,6 +5257,7 @@ function closeRec(){
   t('videó',()=>ytStop());
   document.body.classList.remove('playing','yt','ytmin');
   t('nézet',()=>show('vLib'));
+  t('gomb',()=>libBtn());
   t('polc',()=>drawLib());
 }
 
@@ -4813,12 +5268,24 @@ function show(id){
   $('karaWrap').scrollTop=0;
   if(id==='vSet'){ drawCost(); drawStore(); drawLog(); drawBank() }
   if(id==='vLib'){ drawLib(); disarmBack&&disarmBack() }
-  /* v61: a fejléc-gomb ne hazudjon állapotot — a könyvtárban nincs hova
-     „könyvtárazni", ilyenkor halvány és tétlen */
-  const b=$('bLib'); if(b){ b.disabled=(id==='vLib'); b.style.opacity=(id==='vLib')?.35:1 }
+  libBtn();
+}
+/* v65 JAVÍTÁS: a fejléc „könyvtár" gombja a lejátszóban is aktív legyen.
+   A v61-es „őszinte állapot" a NÉZET azonosítójából döntött — csak hogy a
+   lejátszó nem külön nézet: a vLib marad bekapcsolva, és a body kap egy
+   .playing osztályt. Így a gomb lejátszás közben is letiltva maradt, vagyis
+   pont ott nem működött, ahol a legtöbbet kell: visszalépni a könyvtárba.
+   Mostantól csak akkor tétlen, ha tényleg a könyvtárban állunk. */
+function libBtn(){
+  const b=$('bLib'); if(!b) return;
+  const jatszik=document.body.classList.contains('playing');
+  const konyvtarban=$('vLib').classList.contains('on')&&!jatszik;
+  b.disabled=konyvtarban;
+  b.style.opacity=konyvtarban?.35:1;
+  b.textContent=jatszik?'könyvtár':'könyvtár';
 }
 $('bLib').onclick=()=>{ if(document.body.classList.contains('playing')) closeRec(); else show('vLib') };
-addEventListener('load',()=>{ const b=$('bLib'); if(b&&$('vLib').classList.contains('on')){ b.disabled=true; b.style.opacity=.35 } });
+addEventListener('load',libBtn);
 $('bSet').onclick=()=>{ if(document.body.classList.contains('playing')){ A.pause() } show('vSet'); armBack() };
 $('bSet2').onclick=()=>{ show('vSet'); armBack() };
 
@@ -5240,6 +5707,15 @@ async function feedTry(url){
   return await r.text();
 }
 async function feedLoad(url,allowProxy){
+  /* v63: a natív appban natív HTTP-vel töltünk — arra NEM vonatkozik a CORS,
+     tehát nem kell se proxy, se kézi letöltés */
+  if(MAPPA){
+    try{
+      const r=await MAPPA.http({url});
+      if(r&&r.status<400&&r.text) return feedParse(r.text);
+      log('natív feed-letöltés:',r&&r.status);
+    }catch(e){ log('natív feed-letöltés:',e) }
+  }
   let direct=null;
   try{ return feedParse(await feedTry(url)) }
   catch(e){ direct=e }
@@ -5257,6 +5733,34 @@ const fdSafe=t=>String(t||'epizod').replace(/[\\/:*?"<>|]+/g,'-').replace(/\s+/g
 async function feedGrab(it){
   progShow(true); $('progHide').classList.add('hid');
   progSet(1,'letöltés',it.title);
+  /* v63: a natív appban az epizód EGYENESEN a podcast-mappába töltődik —
+     nincs böngésző-tároló, nincs CORS, a fájl ott lesz, ahol a többi */
+  if(MAPPA){
+    try{
+      const cur=await MAPPA.current();
+      if(cur&&cur.uri){
+        const nev=fdSafe(it.title)+'.mp3';
+        const fig=MAPPA.addListener('progress',ev=>{
+          const p=ev.total>0?Math.round(ev.bytes/ev.total*90):0;
+          progSet(Math.max(2,p),'letöltés',fmtMB(ev.bytes)+
+            (ev.total>0?' / '+fmtMB(ev.total):'')) });
+        try{
+          const r=await MAPPA.download({url:it.url,name:nev});
+          try{ (await fig).remove() }catch(e){}
+          progSet(95,'letöltés','beolvasás a mappából');
+          await folderScan(true);
+          progShow(false);
+          toast('letöltve a mappába: '+nev,4500);
+          const f=(FOLDER||[]).find(x=>x.uri===r.uri);
+          if(f) return folderOpen(f);
+          return;
+        }catch(e){
+          try{ (await fig).remove() }catch(x){}
+          log('natív letöltés:',e);   /* esik tovább a régi útra */
+        }
+      }
+    }catch(e){ log('natív letöltés-előkészítés:',e) }
+  }
   let res=null;
   try{ res=await fetch(it.url,{mode:'cors',redirect:'follow'}) }catch(e){ res=null }
   if(!res||!res.ok){ progShow(false); return feedManual(it) }
@@ -5401,10 +5905,12 @@ async function addFile(file,opts){
   await save(rec);
   progShow(false);
   MED=M; FILE=file;
-  /* A hangot NEM várjuk meg: a hallgatás és a felismerés a behúzott fájlból már
-     most működik, a készülékre mentés a háttérben fut. */
+  /* v63: mappából megnyitva NINCS másolás — a hang a mappában marad, a lejátszó
+     a localhost-kiszolgálón streamel. A felvétel megjegyzi a mappa-hivatkozást,
+     hogy legközelebb magától megtalálja. */
+  if(file.saf){ rec.saf=file.saf; rec.hasAudio=0; rec.ach=0 }
   await openRec(rec,file);
-  bgSaveAudio(rec,file);
+  if(!file.saf) bgSaveAudio(rec,file);
   const gap=nextGap(rec.done,0,rec.dur||1e9);
   if(gap){
     if(!CFG.asrKey){ show('vSet'); toast('add meg a felismerő kulcsát, aztán indítsd a feldolgozást',5000) }
@@ -5586,9 +6092,26 @@ async function drawLib(){
     for(const l of ls){
       const met=l.items.map(id=>byId[id]).filter(Boolean);
       if(!met.length) continue;
+      /* v65 JAVÍTÁS: a kibontott lista részei EGY CSOPORTBAN, láthatóan a
+         listához tartozva. Eddig ugyanabba a rácsba kerültek, mint a listán
+         kívüli felvételek — így úgy tűnt, mintha a lista „kiszórta volna a
+         részeit az asztalra", pedig csak a kibontott nézet volt jelöletlen.
+         (A csempék a listában is benne vannak, adat nem mozdult.) */
       try{ box.appendChild(bkListCard(l,met,byId)) }catch(e){ log('polc-lista:',e) }
-      if(l.open) for(const r of met){
-        try{ box.appendChild(bkCard(r,true)) }catch(e){ log('polc-elem:',e) }
+      if(l.open){
+        const grp=document.createElement('div'); grp.className='lgroup';
+        const cap=document.createElement('div'); cap.className='lgcap';
+        cap.innerHTML='<span>'+esc(l.name)+' — '+met.length+' rész</span>'+
+          '<button class="mini">becsukás</button>';
+        cap.querySelector('button').onclick=e=>{ e.stopPropagation();
+          l.open=0; saveCfg(); drawLib() };
+        grp.appendChild(cap);
+        const rack=document.createElement('div'); rack.className='lgrack';
+        for(const r of met){
+          try{ rack.appendChild(bkCard(r,true)) }catch(e){ log('polc-elem:',e) }
+        }
+        grp.appendChild(rack);
+        box.appendChild(grp);
       }
     }
     const kint=recs.filter(r=>!inAnyList(r.id)).sort((a,b)=>(b.added||0)-(a.added||0));

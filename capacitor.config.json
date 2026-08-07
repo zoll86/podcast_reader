@@ -2,6 +2,11 @@
   "appId": "hu.zoll86.hallgato",
   "appName": "Kétnyelvű hallgató",
   "webDir": "www",
-  "server": { "androidScheme": "https" },
-  "android": { "allowMixedContent": true }
+  "server": {
+    "androidScheme": "https",
+    "cleartext": true
+  },
+  "android": {
+    "allowMixedContent": true
+  }
 }
