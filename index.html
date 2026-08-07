@@ -984,7 +984,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v66';
+const APP_VER='v68';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -4694,11 +4694,19 @@ document.addEventListener('click',e=>{
 /* ---- lejátszó gombok ---- */
 $('pPlay').onclick=()=>{ breathCancel(false);
   if(!A.src&&!A.isYt){
-    /* v62: a play a felhasználó kifejezett szándéka — nem magyarázunk,
-       hanem egyből nyitjuk a fájlválasztót (a koppintás gesztusa engedi) */
-    if(REC){ ONEFILE=true; $('file').click();
-      toast('válaszd ki a hangfájlt — a szöveg és a pozíció megmarad',4500); return }
-    return toast('nincs betöltve hang');
+    if(!REC) return toast('nincs betöltve hang');
+    /* v67: előbb a kijelölt mappában keressük — ott a legtöbb esetben megvan */
+    if(MAPPA){
+      folderFind(REC).then(f=>{
+        if(f) safAttach(REC,f).then(()=>A.play().catch(()=>{}));
+        else askAudio(REC);
+      }).catch(()=>askAudio(REC));
+      return;
+    }
+    /* v62: kulcs nélküli böngészőben a play kifejezett szándék — fájlválasztó */
+    ONEFILE=true; $('file').click();
+    toast('válaszd ki a hangfájlt — a szöveg és a pozíció megmarad',4500);
+    return;
   }
   A.paused?A.play().catch(e=>toast('nem indul: '+e.message)):A.pause() };
 $('pPrev').onclick=()=>{ breathCancel(false); gotoSen(CUR<=0?0:CUR-1) };
@@ -4811,6 +4819,9 @@ try{ SHOWURL=JSON.parse(localStorage.getItem('showurl')||'{}') }catch(e){ SHOWUR
 /* a műsor részei — lap, ahol egy koppintás elindítja a feldolgozást */
 async function showOpen(sh){
   if(JOB.on||RT) return toast('előbb fejezd be a futó feldolgozást');
+  /* v68: ugyanabban a menetben már letöltött feed újra használható — nem
+     kérjük le másodszor, a lapozás így azonnali */
+  if(FEEDCACHE[sh.i]) return showList(sh,FEEDCACHE[sh.i].f,0);
   toast('epizódok betöltése: '+sh.n,2500);
   let url,f;
   try{
@@ -4822,22 +4833,38 @@ async function showOpen(sh){
       {t:'próbálkozás újra',fn:()=>showOpen(sh)},
       {t:'a feed címének megnyitása böngészőben',fn:()=>{ try{ open(url,'_blank') }catch(x){} }}]);
   }
-  const it=(f.items||[]).slice(0,60);
-  if(!it.length) return toast('ez a feed most nem adott epizódot',4000);
-  /* melyik rész van már meg? (a mappában vagy a könyvtárban) */
+  const mind=(f.items||[]);
+  if(!mind.length) return toast('ez a feed most nem adott epizódot',4000);
+  FEEDCACHE[sh.i]={f:f,sh:sh};
+  showList(sh,f,0);
+}
+/* v68: a TELJES epizódlista, 100-as lapokban. Eddig 60 részt mutattam — a
+   hosszú műsoroknál (Night Vale 300+) ez levágta a javát. A lap alján
+   „további 100 rész" lép tovább, a tetején pedig a helyzet látszik. */
+const FEEDCACHE={};
+const LAP=100;
+async function showList(sh,f,tol){
+  const mind=f.items||[];
   let meglevo={};
   try{ (await txtAll()).forEach(r=>{ meglevo[fdSafe(r.name)]=r }) }catch(e){}
-  const items=[{note:(f.title||sh.n)+' — '+it.length+' rész. Koppints egy részre: '+
+  const vege=Math.min(mind.length,tol+LAP);
+  const items=[{note:(f.title||sh.n)+' — '+mind.length+' rész'+
+    (mind.length>LAP?' ('+(tol+1)+'–'+vege+' látszik)':'')+'. Koppints egy részre: '+
     (MAPPA?'letöltöm a podcast-mappába, megnyitom, és indul a feldolgozás.'
           :'letöltöm és megnyitom.')}];
-  for(const e of it){
+  if(tol>0) items.push({t:'⟵ előző '+Math.min(LAP,tol)+' rész',
+    fn:()=>{ closeSheet(); showList(sh,f,Math.max(0,tol-LAP)) }});
+  for(let i=tol;i<vege;i++){
+    const e=mind[i];
     const kesz=meglevo[fdSafe(e.title)];
     items.push({art:f.cover||null,
-      t:(kesz?'✓ ':'')+e.title+(e.dur?'  ·  '+e.dur:''),
+      t:(kesz?'✓ ':'')+(i+1)+'. '+e.title+(e.dur?'  ·  '+e.dur:''),
       fn:()=>{ closeSheet();
         if(kesz) return openRecById(kesz.id);
         feedGrab(e); }});
   }
+  if(vege<mind.length) items.push({t:'további '+Math.min(LAP,mind.length-vege)+' rész ⟶',pri:1,
+    fn:()=>{ closeSheet(); showList(sh,f,vege) }});
   sheet(sh.n,items);
 }
 async function openRecById(id){
@@ -4934,6 +4961,45 @@ async function folderDraw(){
     box.appendChild(row);
   }
 }
+/* ======== v67: A MAPPA MINDEN FELVÉTELHEZ MEGTALÁLJA A HANGOT ========
+   A v63-ban a mappa-hivatkozás (rec.saf) csak akkor került a felvételbe, ha
+   a mappa-listából nyitottad meg. A korábban behúzott felvételeknél nem volt
+   ilyen, ezért a program hangfájlt kért — pedig a mappa már ki volt jelölve,
+   és a fájl ott volt benne. Márpedig a felvétel AZONOSÍTÓJA maga is „név|méret"
+   (mediaId), és ugyanez a mappa fájljaiból is kiszámolható: ha egyezik, az
+   biztosan ugyanaz a fájl. Így minden felvétel magától megtalálja a hangját,
+   és a hivatkozás bekerül — legközelebb már kérdés nélkül szól. */
+const safId=f=>(f.name||'hang').replace(/\.[^.]+$/,'').replace(/\s+/g,' ').trim().slice(0,70)+'|'+f.size;
+async function folderFind(rec){
+  if(!MAPPA) return null;
+  try{
+    await srvReady();
+    if(!(FOLDER||[]).length){
+      const cur=await MAPPA.current();
+      if(!cur||!cur.uri) return null;
+      await folderScan(true);
+    }
+    /* 1. biztos egyezés: az azonosító (név + bájtméret) */
+    let f=(FOLDER||[]).find(x=>safId(x)===rec.id);
+    /* 2. tartalék: pontos név (kiterjesztés nélkül), ha a méret változott */
+    if(!f){
+      const nev=String(rec.name||'').trim().toLowerCase();
+      f=(FOLDER||[]).find(x=>String(x.name||'').replace(/\.[^.]+$/,'').trim().toLowerCase()===nev);
+    }
+    return f||null;
+  }catch(e){ log('mappa-keresés:',e); return null }
+}
+/* a megtalált mappa-fájl bekötése a lejátszóba (és elmentése a felvételbe) */
+async function safAttach(rec,f){
+  const sf=safFile(f);
+  A.src=sf.url; FILE=sf;
+  if(rec.saf!==f.uri){ rec.saf=f.uri; txtPut(strip(rec)).catch(e=>log('mappa-hivatkozás mentése:',e)) }
+  if(rec.pos) A.currentTime=rec.pos;
+  if(nextGap(rec.done,0,rec.dur||1e9)) prepMedia().catch(e=>log('előkészítés:',e));
+  log('hang a mappából:',f.name);
+  return true;
+}
+
 /* Megnyitás a mappából: nincs másolás, nincs behúzás. */
 async function folderOpen(f){
   if(JOB.on||RT) return toast('előbb fejezd be a futó feldolgozást');
@@ -5197,7 +5263,8 @@ async function openRec(rec,fileMaybe){
     /* a szeleteléshez a szerkezet is kell, de csak akkor, ha van mit feldolgozni */
     if(nextGap(rec.done,0,rec.dur||1e9)) prepMedia().catch(e=>log('előkészítés:',e));
   }else{
-    /* v63: mappás felvétel — a hangot a mappából vesszük, ha még ott van */
+    /* v63: mappás felvétel — a hangot a mappából vesszük, ha még ott van.
+       v67: ha nincs hivatkozás (régi felvétel), a mappát is átvizsgáljuk. */
     let safOk=false;
     if(rec.saf&&MAPPA){
       try{
@@ -5205,15 +5272,14 @@ async function openRec(rec,fileMaybe){
         const f=(FOLDER||[]).find(x=>x.uri===rec.saf);
         const meret=f?f.size:(await MAPPA.size({uri:rec.saf})).size;
         if(meret>0){
-          const sf=safFile({uri:rec.saf,name:(f&&f.name)||rec.name,size:meret,
+          safOk=await safAttach(rec,{uri:rec.saf,name:(f&&f.name)||rec.name,size:meret,
             mime:(f&&f.mime)||'',folder:(f&&f.folder)||'',mtime:Date.now()});
-          A.src=sf.url; FILE=sf;
-          if(rec.pos) A.currentTime=rec.pos;
-          if(nextGap(rec.done,0,rec.dur||1e9)) prepMedia().catch(e=>log('előkészítés:',e));
-          safOk=true;
-          log('hang a mappából:',rec.name);
         }
       }catch(e){ log('mappa-hang nem érhető el:',e) }
+    }
+    if(!safOk&&MAPPA){                 /* v67: keresés a kijelölt mappában */
+      const f=await folderFind(rec);
+      if(f){ try{ safOk=await safAttach(rec,f) }catch(e){ log('mappa-bekötés:',e) } }
     }
     if(!safOk){
       A.removeAttribute('src'); FILE=null;
@@ -5233,12 +5299,24 @@ let FILE=null;
    szöveghez és pozícióhoz párosul (az azonosító a fájlból számolódik, tehát
    ugyanaz a fájl ugyanahhoz a felvételhez talál vissza). */
 function askAudio(rec){
-  sheet(rec&&rec.name||'nincs hang',[
-    {note:'Ehhez a felvételhez nincs hang a készüléken — a szöveg és a pozíció '+
-      'megvan. Válaszd ki a hangfájlt, és összepárosítom.'},
-    {t:'hangfájl választása most',pri:1,fn:()=>{ ONEFILE=true; $('file').click() }},
-    {t:'később',fn:()=>{}}
-  ]);
+  const items=[{note:'Ehhez a felvételhez nincs hang a készüléken — a szöveg és a '+
+    'pozíció megvan.'+(MAPPA?' A kijelölt podcast-mappában sem találtam ilyen nevű '+
+    'és méretű fájlt.':'')}];
+  if(MAPPA){
+    /* v67: a mappa a legrövidebb út — újraolvasás, majd újrapróbálkozás */
+    items.push({t:'podcast-mappa újraolvasása',pri:1,fn:async()=>{
+      closeSheet(); await folderScan(); const f=await folderFind(rec);
+      if(f){ await safAttach(rec,f); toast('megvan a hang a mappában',3500) }
+      else toast('a mappában nincs ilyen fájl — jelöld ki a mappát vagy válaszd ki a fájlt',6000);
+    }});
+    items.push({t:'másik mappa kijelölése',fn:async()=>{ closeSheet(); await folderPick();
+      const f=await folderFind(rec);
+      if(f){ await safAttach(rec,f); toast('megvan a hang a mappában',3500) } }});
+  }
+  items.push({t:'hangfájl választása kézzel',pri:!MAPPA?1:0,
+    fn:()=>{ ONEFILE=true; $('file').click() }});
+  items.push({t:'később',fn:()=>{}});
+  sheet(rec&&rec.name||'nincs hang',items);
 }
 async function prepMedia(){
   if(MED||!FILE) return MED;
@@ -5680,7 +5758,8 @@ function feedParse(txt){
   const tx=(el,tag)=>{ const x=el&&el.getElementsByTagName(tag)[0]; return x?(x.textContent||'').trim():'' };
   const out={title:tx(ch,'title'),items:[]};
   const items=doc.getElementsByTagName('item');
-  for(let i=0;i<items.length&&out.items.length<300;i++){
+  /* v68: a régi 300-as korlát levágta a hosszú műsorokat (Night Vale 300+) */
+  for(let i=0;i<items.length&&out.items.length<2000;i++){
     const it=items[i], enc=it.getElementsByTagName('enclosure')[0];
     if(!enc) continue;
     const u=enc.getAttribute('url')||'';
