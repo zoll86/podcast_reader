@@ -180,7 +180,7 @@ body.playing .view{display:none}
   transition:opacity .3s ease}
 .sen .en{font-family:var(--kff);font-size:var(--kfs);line-height:1.42;color:var(--txt2);
   letter-spacing:.002em}
-.sen .hu{font-size:calc(var(--kfs) / 1.618);line-height:1.5;color:var(--dim);
+.sen .hu{font-size:calc(var(--kfs) / 1.618);line-height:1.55;color:var(--dim);
   margin-top:var(--sp2);display:none}
 .sen.near{opacity:.42}
 .sen.far{opacity:.16}
@@ -245,7 +245,7 @@ body.playing.splithu #huWrap,body.playing.learn #huWrap{display:block}
 /* egy magyar buborék = egy TELJES magyar mondat, akkor is, ha felül három-négy
    angol töredék tartozik hozzá (huKey szerinti összevonás) */
 .hs{position:relative;padding-left:var(--sp4);margin-bottom:var(--sp6);cursor:pointer;
-  font-family:var(--kff);font-size:var(--kfs);line-height:1.42;color:var(--txt2);
+  font-family:var(--kff);font-size:var(--kfs);line-height:1.55;color:var(--txt2);
   transition:opacity .3s ease}
 .hs.near{opacity:.42}
 .hs.far{opacity:.16}
@@ -463,6 +463,12 @@ body.learn .hs.cur{font-size:calc(var(--kfs) * 1.5)}
 #peek.on{display:block}
 #peek b{display:block;font-family:var(--mono);font-size:var(--t1);color:var(--faint);
   font-weight:400;letter-spacing:.08em;text-transform:uppercase;margin-bottom:var(--sp2)}
+/* v54: olvasási ráhagyás jelzője — a lélegzetnyi szünet alatt három pont
+   lüktet az aktuális magyar kártya sarkában: a program vár, nem elakadt */
+body.breath .hs.cur:after{content:'⋯';position:absolute;right:12px;bottom:4px;
+  font-family:var(--mono);font-size:var(--t3);color:var(--gold);
+  animation:bpulse 1.1s ease infinite}
+@keyframes bpulse{0%,100%{opacity:.25}50%{opacity:.9}}
 /* ---------- immerzív mód ----------
    Hallgatás közben a fejléc és a kezelősáv néhány másodperc után elhalványul, és
    a teljes képernyő szöveg lesz. A vezérlés ilyenkor koppintás-zónákra vált:
@@ -692,6 +698,12 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
       <div class="note">Elrejtve az egész képernyő szöveg lesz, és koppintással
         vezérelhető: a bal és a jobb szél mondatot léptet (szünetben is), a közepe
         szüneteltet, a felső harmad visszahozza a kezelőket.</div>
+      <label class="lbl">olvasási ráhagyás</label>
+      <div class="seg" id="segBreath"></div>
+      <div class="note">Ahol a magyar hosszabb, mint amennyi idő alatt az angol
+        elhangzik, a mondat végén egy lélegzetnyi szünetet tart, hogy végig tudd
+        olvasni. A hang sebességéhez nem nyúl, és csak ott lép közbe, ahol tényleg
+        kellene az idő.</div>
       <label class="lbl">magyar sor</label>
       <div class="seg" id="segHu">
         <button data-k="split">alul, felezve</button>
@@ -892,7 +904,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v53';
+const APP_VER='v54';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -951,6 +963,7 @@ var CFG=Object.assign({
   asr:'groq', asrKey:'', asrUrl:'', asrModel:'', chunkMin:5, words:1,
   tr:'free', clKey:'', clModel:'haiku', oaiUrl:'https://api.moonshot.ai/v1', oaiKey:'', oaiModel:'kimi-k2.6',
   kfs:1.35, font:'lit', huMode:'split', rate:1, keepAudio:1, trMode:'all', follow:0,
+  breath:1,
   immSec:5, immTip:0, pairs:0, learn:0, weave:1, wDens:1, paged:1, shelf:1,
   feeds:[], queue:[],
   proxy:0, proxyUrl:'https://api.allorigins.win/raw?url='
@@ -2548,6 +2561,21 @@ function sentencize(rec,force){
   return n;
 }
 
+/* v54: a tisztítás és a rendezés nem fixpontos EGY menetben: az összeolvasztás
+   után válhat láthatóvá olyan szomszédos ismétlés, amit töredékenként nem
+   lehetett bizonyítani (a mérés mutatta ki: a friss exporton a második kör még
+   2 duplikátumot és 4 rendezendőt talált). Ezért iterálunk, amíg mindkettő
+   nullát nem ad — a gyakorlatban 2-3 kör. */
+function tidySen(rec,force){
+  let ossz=0;
+  for(let kor=0;kor<4;kor++){
+    const n=dedupSen(rec)+sentencize(rec,force);
+    ossz+=n;
+    if(!n) break;
+  }
+  return ossz;
+}
+
 /* `force` nélkül csak azokat fűzi össze, amelyeknek MÉG NINCS fordítása (a friss
    felismerésnél ez az összes) — így soha nem dobunk el kész magyar szöveget úgy,
    hogy ne kérnénk rá újat. */
@@ -2589,13 +2617,9 @@ function mergeSen(rec,sen){
      2. az összefűzés az EREDETI felismerői időkkel fut — a normSen a b-ket
         a következő kezdetéig húzza, ami után a <2 s szünet-szűrő halott volt;
      3. az időrend a megjelenítéshez, mint eddig. */
-  const tiszt=dedupSen(rec);
-  if(tiszt) log('tisztítás: '+tiszt+' duplikátum-maradvány eltávolítva');
-  /* v53: mondat = töredék = buborék — a szétvágott mondat egyé olvad, a több
-     mondatot hordozó töredék mondatonként szétválik. A fordítás így eleve
-     TELJES mondatot kap, és a két sáv buboréka mindig ugyanaz a mondat. */
-  const fuzve=sentencize(rec,false);
-  if(fuzve) log('mondatokra rendezés: '+fuzve+' töredék igazítva mondathatárra');
+  /* v53: mondat = töredék = buborék; v54: iterálva, amíg stabil (tidySen) */
+  const fuzve=tidySen(rec,false);
+  if(fuzve) log('mondatokra rendezés: '+fuzve+' igazítás (tisztítás + mondathatár)');
   /* v49: minden beolvasztás után rendbe tesszük az időrendet — enélkül az újonnan
      megtalált mondat egy meglévővel egy időben indulhat, és soha nem kerül sorra */
   const igazitva=normSen(rec);
@@ -2961,9 +2985,7 @@ async function stitchFix(rec){
   JOB.on=true; JOB.stop=false;
   progShow(true); $('progHide').classList.add('hid'); $('progStop').textContent='szüneteltetés';
   try{
-    const tiszt=dedupSen(rec);
-    if(tiszt) log('rendezés előtti tisztítás: '+tiszt+' duplikátum-maradvány');
-    const n=sentencize(rec,true);
+    const n=tidySen(rec,true);
     normSen(rec);
     const need=rec.sen.filter(x=>!x.hu);
     progSet(5,'mondat-rendezés',need.length+' mondat fordítása');
@@ -2985,6 +3007,71 @@ async function stitchFix(rec){
     JOB.on=false; if(cacheDirty) saveCache(); await save(rec); drawLib();
   }
 }
+/* ======== v54: SZÖVEG RENDBETÉTELE — egy gomb az összes javító helyett ========
+   A ⋯ menü SZÖVEG szakasza hat külön javítóeszközzé nőtt (pótlás, szópárok,
+   rendezés, tisztítás, újraépítés, írásjelezés, szétvágás) — mind egy-egy régi
+   hiba emlékműve: valami nem működött, kapott egy menüpontot. A v52–v53 óta az
+   alap automatikusan rendben tartja magát (tisztít, mondatokra rendez,
+   írásjelez a lánc elején), tehát ami maradt, az a RÉGI felvételek egyszeri
+   rendbetétele — és ahhoz nem hat gomb kell, hanem egy, ami előbb megnézi, mi
+   a baj, megmondja, és jóváhagyás után megcsinálja. A régi függvények
+   megmaradtak (ő hívja őket, ahol kell) — csak a menüből tűntek el. */
+async function textDoctor(rec){
+  if(!rec||!(rec.sen||[]).length) return toast('ehhez előbb szöveg kell — indíts felismerést');
+  if(JOB.on||RT) return toast('már fut egy feldolgozás');
+  /* diagnózis MÁSOLATON — a valódihoz csak jóváhagyás után nyúlunk */
+  const proba={sen:rec.sen.map(x=>({...x}))};
+  const dup=dedupSen(proba);
+  const rend=sentencize(proba,true)+tidySen(proba,true);   /* iterálva, amíg stabil */
+  const runs=senRuns(rec).filter(x=>needPunct(x.map(y=>y.t))).length;
+  const hiany=proba.sen.filter(x=>!x.hu).length;
+  const wantPar=CFG.pairs&&CFG.tr!=='free'&&CFG.tr!=='deepl';
+  const par=wantPar?proba.sen.filter(x=>x.hu&&(!x.pairs||!x.pairs.length)).length:0;
+  const lelet=[];
+  if(dup) lelet.push(dup+' duplikátum-maradvány');
+  if(rend) lelet.push(rend+' mondathatárra igazítandó buborék');
+  if(runs) lelet.push(runs+' írásjel nélküli szakasz'+(llmOk()?'':' — LLM-kulcs híján ez kimarad'));
+  if(hiany) lelet.push(hiany+' hiányzó fordítás');
+  if(par) lelet.push(par+' mondat szópár nélkül');
+  if(!lelet.length) return toast('a szöveg rendben van — nincs teendő',4000);
+  if(!confirm('Ezt találtam:\n\n• '+lelet.join('\n• ')+
+    '\n\nRendbe tegyem? Csak az érintett mondatok fordulnak újra, a többihez nem nyúlok.')) return;
+  /* írásjel nélküli szakaszoknál a teljes újraépítés a helyes út: az mindent
+     elvégez ebben a sorrendben (írásjelezés → tagolás → rendezés → fordítás) */
+  if(runs&&llmOk()){ dedupSen(rec); return rebuildText(rec,true) }
+  JOB.on=true; JOB.stop=false;
+  progShow(true); $('progHide').classList.add('hid'); $('progStop').textContent='szüneteltetés';
+  try{
+    tidySen(rec,true);
+    normSen(rec);
+    const need=rec.sen.filter(x=>!x.hu);
+    if(need.length){
+      progSet(5,'rendbetétel',need.length+' mondat fordítása');
+      await fillHu(need,(k,t)=>progSet(5+k/Math.max(1,t)*(par?70:90),'rendbetétel',k+' / '+t),
+        ()=>JOB.stop);
+    }
+    if(par&&!JOB.stop){
+      progSet(80,'rendbetétel','szópárok pótlása');
+      await fillPairs(rec.sen,(k,t)=>progSet(80+k/Math.max(1,t)*15,'rendbetétel','szópárok: '+k+' / '+t),
+        ()=>JOB.stop);
+    }
+    if(cacheDirty) saveCache();
+    await save(rec);
+    CUR=senAt(A.currentTime||0);
+    huBuild(); renderKara(false); layoutSplit(); pgReset(); renderHu(true); paintCur(true);
+    progSet(100,'kész','a szöveg rendben van');
+    $('progStop').textContent='újra'; $('progHide').classList.remove('hid');
+    log('rendbetétel: '+lelet.join(', '));
+    toast('rendbe téve: '+lelet.join(', '),6000);
+  }catch(e){
+    log('rendbetétel megállt:',e);
+    progSet(99,'megállt',String(e.message).slice(0,180));
+    $('progStop').textContent='újra'; $('progHide').classList.remove('hid');
+  }finally{
+    JOB.on=false; if(cacheDirty) saveCache(); await save(rec); drawLib();
+  }
+}
+
 /* v52: kézi duplikátum-tisztítás a már sérült felvételekre — lefuttatja a
    dedupSen-t, újrafűzi az érintetteket, és CSAK azokat fordítja újra,
    amelyeknek a szövege változott. A többi fordításhoz nem nyúl. */
@@ -2999,7 +3086,7 @@ async function cleanDupes(rec){
       progShow(false); JOB.on=false;
       return toast('nem találtam duplikátum-maradványt',4000);
     }
-    sentencize(rec,false);
+    tidySen(rec,false);
     normSen(rec);
     const need=rec.sen.filter(x=>!x.hu);
     progSet(5,'tisztítás',n+' beavatkozás · '+need.length+' mondat újrafordítása');
@@ -3067,7 +3154,7 @@ async function rebuildText(rec,punct){
   const volt=rec.sen.length;
   try{
     rec.sen=neu;
-    sentencize(rec,false);     /* v53: mondat = töredék = buborék */
+    tidySen(rec,false);        /* v53–v54: mondat = buborék, iterálva amíg stabil */
     normSen(rec);
     const need=rec.sen.filter(x=>!x.hu);
     if(need.length){
@@ -3895,7 +3982,7 @@ function scrollTick(jump){
     const cur=hb.querySelector('.hs.cur'), q=HUG[gi];
     if(cur&&q){
       const tg=bandTop(hw,cur,q.a,q.b,12);
-      if(hw.scrollTop!==tg){ markSelf(); hw.scrollTop=tg }
+      glideTo(hw,tg,jump);                       /* v54: siklás, nem ugrás */
     }
   }
   /* angol oldal: ugyanaz a szabály a fejléc alatt */
@@ -3904,7 +3991,7 @@ function scrollTick(jump){
     const cur=kb.querySelector('.sen.cur'), s=CUR>=0?REC.sen[CUR]:null;
     if(cur&&s){
       const tg=bandTop(kw,cur,s.a,s.b,12);
-      if(kw.scrollTop!==tg){ markSelf(); kw.scrollTop=tg }
+      glideTo(kw,tg,jump);                       /* v54: siklás, nem ugrás */
     }
   }
 }
@@ -3992,6 +4079,66 @@ function paintCur(jump){
   }
   lastSpoken=-1;
 }
+/* ======== v54: OLVASÁSI RÁHAGYÁS ========
+   A podcast diktálja a tempót, de a MAGYART kell elolvasni annyi idő alatt,
+   amennyi alatt az angol elhangzik — és a magyar jellemzően hosszabb. A
+   feliratolvasási kutatás plafonja ~17 karakter/mp: ahol a mondat ez fölé
+   kényszerítené az olvasót, ott a mondat VÉGÉN egy lélegzetnyi szünetet
+   tartunk (a természetes mondatközt beszámítva), legfeljebb 2,8 mp-et. A hang
+   sebességéhez nem nyúlunk — a globális lassítással szemben ez csak ott ad
+   időt, ahol tényleg kell, és a hang torzítatlan marad. */
+const BREATH_CPS=17;
+let BREATH=0;
+function breathNeed(huLen,hangS,kozS){ return huLen/BREATH_CPS-(hangS+kozS) }
+function breathCancel(resume){
+  if(!BREATH) return;
+  clearTimeout(BREATH); BREATH=0;
+  document.body.classList.remove('breath');
+  if(resume) A.play().catch(()=>{});
+}
+function breathMaybe(prev,next){
+  if(!CFG.breath||!REC||A.paused) return;
+  if(CFG.huMode==='hide') return;                 /* nincs mit olvasni */
+  if(loopA!=null&&loopB!=null) return;            /* A–B hurokban nem */
+  const s=REC.sen[prev]; if(!s||!s.hu) return;
+  const rate=A.playbackRate||CFG.rate||1;
+  const hang=Math.max(0.3,s.b-s.a)/rate;
+  const nx=REC.sen[next];
+  const koz=nx?Math.max(0,nx.a-s.b)/rate:0;       /* a természetes szünet már a tiéd */
+  const kell=breathNeed((s.hu||'').length,hang,koz);
+  if(kell<0.35) return;
+  A.pause();
+  document.body.classList.add('breath');
+  BREATH=setTimeout(()=>{
+    BREATH=0; document.body.classList.remove('breath');
+    A.play().catch(()=>{});
+  },Math.min(2800,Math.round(kell*1000)));
+}
+
+/* ======== v54: SIKLÓ FÓKUSZVONAL ========
+   Az aktuális kártya helye a sávban rögzített (a szem mindig ugyanoda néz), de
+   a mondatváltás eddig UGRÁS volt — a szem elvesztette a horgonyt egy
+   pillanatra. Most a folyam odasiklik az új célra (~250 ms, kisimuló), a
+   mondat alatt pedig áll, mert mozgó szöveget olvasni nehezebb. */
+const GLIDE=new Map();
+let glideRaf=0;
+function glideStep(){
+  glideRaf=0;
+  let tobb=false;
+  GLIDE.forEach((tg,el)=>{
+    const d=tg-el.scrollTop;
+    if(Math.abs(d)<=1){ markSelf(); el.scrollTop=tg; GLIDE.delete(el); return }
+    markSelf(); el.scrollTop+=d*0.22; tobb=true;
+  });
+  if(tobb) glideRaf=requestAnimationFrame(glideStep);
+}
+function glideTo(el,tg,jump){
+  if(jump){ GLIDE.delete(el); markSelf(); el.scrollTop=tg; return }
+  if(Math.abs(el.scrollTop-tg)<=1){ GLIDE.delete(el); return }
+  GLIDE.set(el,tg);
+  if(!glideRaf) glideRaf=requestAnimationFrame(glideStep);
+}
+
 function tick(){
   if(!REC){ return }
   const t=A.currentTime;
@@ -3999,6 +4146,7 @@ function tick(){
   const i=senAt(t);
   if(i>=0&&i!==CUR){
     bankCredit(CUR);      /* az imént befejezett mondat elszámolása */
+    if(CUR>=0&&i===CUR+1) breathMaybe(CUR,i);   /* v54: olvasási ráhagyás */
     CUR=i;
     if(i<WIN[0]+4||i>=WIN[1]-4) renderKara(false); else paintCur(false);
     if(CFG.huMode==='split') renderHu(false);
@@ -4359,10 +4507,10 @@ document.addEventListener('click',e=>{
 },true);
 
 /* ---- lejátszó gombok ---- */
-$('pPlay').onclick=()=>{ if(!A.src&&!A.isYt) return toast('nincs betöltve hang');
+$('pPlay').onclick=()=>{ breathCancel(false); if(!A.src&&!A.isYt) return toast('nincs betöltve hang');
   A.paused?A.play().catch(e=>toast('nem indul: '+e.message)):A.pause() };
-$('pPrev').onclick=()=>gotoSen(CUR<=0?0:CUR-1);
-$('pNext').onclick=()=>gotoSen(CUR+1);
+$('pPrev').onclick=()=>{ breathCancel(false); gotoSen(CUR<=0?0:CUR-1) };
+$('pNext').onclick=()=>{ breathCancel(false); gotoSen(CUR+1) };
 const RATES=[0.7,0.85,1,1.15,1.3];
 $('pRate').onclick=()=>{
   const i=(RATES.indexOf(CFG.rate)+1)%RATES.length;
@@ -5486,31 +5634,11 @@ $('pMore').onclick=()=>{
     {t:'lejátszás elölről',fn:()=>{ A.currentTime=0; CUR=-1; tick(); A.play().catch(()=>{}) }},
     {t:'bezárás',fn:closeRec},
     {head:'szöveg'},
-    {t:'hiányzó fordítások pótlása',fn:fillMissing},
-    {t:'szópárok pótlása (tanuló módhoz)',fn:fillPairsRec},
-    /* v47: a dalos/zene alatti szakaszok egyetlen óriás fordítási egységet kapnak a
-       felismerőtől — ez vágja szét őket töredékenként (csak azokat fordítja újra) */
-    /* v48: teljes újraépítés a meglévő felismerésből — a hangot nem kérdezzük újra */
-    /* v51: a felismerő szeletén átnyúló mondatokat EGY fordítási egységgé fűzi, és
-       csak az érintett mondatokat fordítja újra */
-    /* v53: buborék = mondat — szétvágott mondat egyé olvad, több mondat szétválik */
-    (()=>{ const gs=REC?stitchGroups(REC):[];
-      const db=gs.reduce((n,g)=>n+(g.i1-g.i0+1),0);
-      return {t:'mondatokra rendezés (buborék = mondat)'+(db?' ('+db+' töredék)':''),
-        fn:()=>stitchFix(REC)} })(),
-    /* v52: a második átfutás részleges ismétlés-maradványait szedi ki
-       („their game. their game", vég-eleje és határon átlógó duplikátumok),
-       és csak az érintetteket fordítja újra */
-    {t:'duplikátumok tisztítása',fn:()=>cleanDupes(REC)},
-    {t:'szöveg újraépítése (angol tagolás + magyar)',fn:()=>rebuildText(REC)},
-    /* v50: ha a felismerő nem tett ki írásjelet, a tagolás sem tud mondatot találni —
-       ez LLM-mel visszateszi az írásjeleket (a szavakhoz nem nyúl), aztán újraépít */
-    (()=>{ const r=REC?senRuns(REC).filter(x=>needPunct(x.map(y=>y.t))).length:0;
-      return {t:'mondathatárok helyreállítása + újraépítés'+(r?' ('+r+' szakasz)':''),
-        fn:()=>rebuildText(REC,true)} })(),
-    (()=>{ const n=REC?hugeUnits(REC).length:0;
-      return {t:'összefolyó fordítások szétvágása'+(n?' ('+n+' töredék)':''),
-        fn:()=>splitUnits(REC)} })(),
+    /* v54: a hat régi javítóeszköz (pótlás, szópárok, rendezés, tisztítás,
+       újraépítés, írásjelezés, szétvágás) EGY gombbá csukódott — a rendbetétel
+       előbb diagnosztizál, aztán jóváhagyással javít. Az alap a v52–v53 óta
+       automatikusan tartja magát, ez a régi felvételeknek kell. */
+    {t:'szöveg rendbetétele',fn:()=>textDoctor(REC)},
     {t:'újrafordítás a beállított motorral',fn:()=>reTranslate(REC)},
     {t:'szöveg betöltése (SRT / kétnyelvű TSV)',fn:()=>askImport(REC)},
     {t:'szöveg beillesztése vágólapról',fn:()=>askPaste(REC)},
@@ -6023,6 +6151,8 @@ function drawSet(){
     CFG.shelf=+k; saveCfg(); drawSet(); drawLib() });
   segFill($('segImm'),[[5,'5 mp után'],[10,'10 mp után'],[0,'soha']],+CFG.immSec||0,k=>{
     CFG.immSec=+k; saveCfg(); drawSet(); if(!k) immSet(false); else immArm() });
+  segFill($('segBreath'),[[1,'be'],[0,'ki']],CFG.breath?1:0,k=>{
+    CFG.breath=+k; saveCfg(); if(!CFG.breath) breathCancel(false) });
   segFill($('segHu'),[['split','alul, felezve'],['pin','gombok felett'],['hide','rejtve']],
     CFG.huMode,k=>{ CFG.huMode=k; saveCfg(); applyLook(); drawHuBtn(); updHuBar(); drawSet() });
   segFill($('segKeep'),[[1,'igen, ha elfér'],[0,'nem, csak a szöveg']],CFG.keepAudio?1:0,k=>{
@@ -6217,7 +6347,7 @@ window.HG={txtAll,txtGet,txtPut,txtDel,medAll,medGet,medDel,openMedia,cut,runJob
   senRuns, runsToSen, needPunct, repunct, punctRebuild, punctNorm,
   contd, stitchGroups, stitchSen, stitchFix,
   dedupText, dedupPair, dedupStraddle, dedupSen, cleanDupes, punctAsr, llmOk,
-  sentencize, splitFrag,
+  sentencize, splitFrag, tidySen, textDoctor, breathNeed, glideTo,
   sheetProcess,
   get job(){return JOB},
   syncHuFlow, huBuild, renderKara,

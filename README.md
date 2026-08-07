@@ -13,6 +13,12 @@ olvasás helyett hallgatás.
 
 ## Mit tud
 
+- **Egy gombos rendbetétel + olvasási ráhagyás (v54)**: a ⋯ menü hat
+  javítóeszköze egyetlen „szöveg rendbetétele" gombbá csukódott, ami előbb
+  diagnosztizál, aztán jóváhagyással javít. Az olvasási ráhagyás ott tart
+  lélegzetnyi szünetet a mondat végén, ahol a magyar nem férne bele az angol
+  idejébe (~17 kar/mp fölött) — a hang sebességéhez nem nyúl. A magyar folyam
+  mondatváltásnál siklik, nem ugrik.
 - **Buborék = mondat (v53)**: az angol buborékban és az alatta lévő magyarban
   mindig ugyanaz a mondat áll, és a fordítási kérésbe is mondat megy — vágni
   csak mondathatáron szabad. A felismerő által szétvágott mondat egy töredékké

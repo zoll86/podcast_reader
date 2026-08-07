@@ -1,5 +1,14 @@
 ---
 
+# KIEGÉSZÍTÉS — v54: EGYSZERŰSÍTÉS + OLVASÁSI ÉLMÉNY
+
+A ⋯ menü SZÖVEG szakasza 10 → 4 pont: a hat javítóeszköz a textDoctor
+(„szöveg rendbetétele") mögé került — diagnózis másolaton, tételes confirm,
+javítás. Új: olvasási ráhagyás (BREATH_CPS=17, breathMaybe a tickben, CFG.breath),
+sikló fókuszvonal (glideTo a scrollTickben), tidySen (dedup+sentencize iterálva
+4 körig — egy menet NEM fixpontos, a mérés bizonyította). Magyar sormagasság
+1,55. Részletek: VALTOZASOK_v54.md.
+
 # KIEGÉSZÍTÉS — v53: BUBORÉK = MONDAT
 
 A v53 a mondatot tette fizikai egységgé: a rec.sen elemei mondatok (sentencize
