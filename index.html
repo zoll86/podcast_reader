@@ -300,23 +300,16 @@ body.learn.paged #huWrap:after{content:'';position:absolute;left:0;right:0;botto
 .hs.gapline{color:var(--faint);font-family:var(--mono);font-size:var(--t2);cursor:default}
 body.hascover .hs:not(.cur){background:rgba(8,7,11,.68);
   box-shadow:0 0 0 7px rgba(8,7,11,.68);border-radius:3px;width:fit-content;max-width:100%}
-/* borító a szöveg mögött: erősen sötétített, a dokk felé egyre sötétebb */
+/* borító a szöveg mögött — v56: sötétítő réteg NÉLKÜL. Az olvashatóságot a
+   buborékok saját alapja adja (chipek a sorok mögött, kártya az aktuálison),
+   a kép filter nélkül él. */
 #coverBg{position:fixed;left:0;right:0;bottom:0;z-index:0;display:none;
   /* a kép teteje a fejléc ALATT kezdődik, kis levegővel — a fejléc nem takar bele */
   top:calc(var(--hdrH,64px) + 10px);
-  /* A borító a kijelző SZÉLESSÉGÉHEZ igazodik, az arány megtartásával — nem
-     nagyítjuk/vágjuk képernyő-magasságra. Első réteg a sötétítő átmenet
-     (teljes felület), második a kép (100% szélesség, magasság arányosan). */
-  background-size:100% 100%, 100% auto;
-  background-position:center, center top;
+  background-size:100% auto;
+  background-position:center top;
   background-repeat:no-repeat}
 body.playing.hascover #coverBg{display:block}
-/* Tanuló módban a TELJES képernyő szöveg, és a magyart OLVASNI kell — a borító
-   ilyenkor MARAD (a felhasználó kérésére), de egy erősebb sötétítő réteget kap,
-   különben egy zsúfolt podcast-borító elviszi azt a kontrasztot, amin a kiemelés
-   múlik. A réteg a képen VAN, tehát a buborékok fölé nem kerül. */
-body.playing.learn #coverBg:after{content:'';position:absolute;inset:0;
-  background:rgba(11,10,14,.56)}
 body.playing.hascover #karaWrap{position:absolute;z-index:1}
 /* fekete háttércsík a sorok mögé, hogy a borítón is olvasható maradjon */
 body.hascover .sen:not(.cur) .en,body.hascover .sen:not(.cur) .hu{
@@ -469,6 +462,13 @@ body.breath .hs.cur:after{content:'⋯';position:absolute;right:12px;bottom:4px;
   font-family:var(--mono);font-size:var(--t3);color:var(--gold);
   animation:bpulse 1.1s ease infinite}
 @keyframes bpulse{0%,100%{opacity:.25}50%{opacity:.9}}
+/* v56: behúzó-kártya csukva/nyitva */
+#intakeTog{cursor:pointer;position:relative;margin-bottom:0}
+#intakeTog:after{content:'▾';position:absolute;right:2px;top:2px;color:var(--faint);
+  font-size:var(--t3);transition:transform .2s ease}
+#intake.closed #intakeTog:after{transform:rotate(-90deg)}
+#intake.closed #intakeBody{display:none}
+#intake:not(.closed) #intakeTog{margin-bottom:var(--sp3)}
 /* ---------- immerzív mód ----------
    Hallgatás közben a fejléc és a kezelősáv néhány másodperc után elhalványul, és
    a teljes képernyő szöveg lesz. A vezérlés ilyenkor koppintás-zónákra vált:
@@ -532,8 +532,9 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
 .bk > span{display:block;font-family:var(--mono);font-size:10px;color:var(--faint);
   margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .bk .pill{display:inline-block;vertical-align:baseline;margin-top:0}
-.bk .more{position:absolute;top:5px;right:5px;width:26px;height:26px;padding:0;border:0;
-  border-radius:50%;background:rgba(8,7,11,.66);color:var(--txt2);font-size:13px;line-height:26px}
+/* v56: 40px-es találati felület (Fitts) — a pötty rajza kisebb, a célja nem */
+.bk .more{position:absolute;top:2px;right:2px;width:40px;height:40px;padding:0;border:0;
+  border-radius:50%;background:rgba(8,7,11,.55);color:var(--txt2);font-size:15px;line-height:40px}
 /* lista = kotegelt borito: ket lap latszik ki alatta */
 .bk.grp .art{box-shadow:0 10px 22px rgba(0,0,0,.45),
   4px -4px 0 -1px rgba(32,28,42,.95),8px -8px 0 -3px rgba(24,21,33,.92)}
@@ -579,8 +580,12 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
          amit ritkán (behúzás) utána, amit egyszer (kulcs-beállítás) a végén. -->
     <div class="lib" id="lib"></div>
 
+    <!-- v56: a behúzás RITKA művelet, mégis a könyvtár alsó felét foglalta —
+         telefonon összecsukva indul (egy sor), a címre koppintva nyílik;
+         asztali gépen, ahol tényleg van egérrel húzás, nyitva marad. -->
     <div class="card" id="intake">
-      <h3>Behúzás<em>hangfájl, YouTube-link vagy podcast-feed</em></h3>
+      <h3 id="intakeTog">Behúzás<em>hangfájl, YouTube-link vagy podcast-feed</em></h3>
+      <div id="intakeBody">
       <div id="drop">
         <b>hangfájl behúzása</b>
         m4b · m4a · mp3 · aac · wav · ogg<br>
@@ -600,6 +605,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
         nem szól. A podcast-feednél az epizódlista sokszor csak átjárón jön át, a
         HANG pedig soha — ha a letöltés elhasal, töltsd le a böngészőben, és húzd be
         a fájlt ide.</div>
+      </div>
     </div>
     <input type="file" id="file" multiple
       accept=".m4b,.m4a,.mp3,.aac,.wav,.ogg,.opus,.mp4,audio/*" class="hid">
@@ -622,6 +628,52 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
   <section class="view" id="vSet">
     <h2>Beállítások</h2>
 
+    <!-- v56: ami MINDENNAPI (megjelenés, hallgatás), az elöl; ami EGYSZERI
+         (motorok, kulcsok), az egy csukható csoport mögött. A ritka és a
+         gyakori keveredése adta a zsúfoltság-érzés nagyját. -->
+    <div class="card">
+      <h3>Megjelenés<em>hallgatás közben</em></h3>
+      <label class="lbl">betűméret</label>
+      <input type="range" id="kFs" min="1.0" max="2.2" step="0.05">
+      <div class="note">aktuális mondat: <b id="vFs"></b></div>
+      <label class="lbl">betűtípus</label>
+      <div class="seg" id="segFont">
+        <button data-k="lit">Literata</button>
+        <button data-k="dm">DM Sans</button>
+        <button data-k="atk">Atkinson</button>
+      </div>
+      <div class="note" id="fontNote"></div>
+      <label class="lbl">kezelők elrejtése hallgatás közben</label>
+      <div class="seg" id="segImm">
+        <button data-k="5">5 mp után</button>
+        <button data-k="10">10 mp után</button>
+        <button data-k="0">soha</button>
+      </div>
+      <div class="note">Elrejtve az egész képernyő szöveg lesz, és koppintással
+        vezérelhető: a bal és a jobb szél mondatot léptet (szünetben is), a közepe
+        szüneteltet, a felső harmad visszahozza a kezelőket.</div>
+      <label class="lbl">olvasási ráhagyás</label>
+      <div class="seg" id="segBreath"></div>
+      <div class="note">Ahol a magyar hosszabb, mint amennyi idő alatt az angol
+        elhangzik, a mondat végén egy lélegzetnyi szünetet tart, hogy végig tudd
+        olvasni. A hang sebességéhez nem nyúl, és csak ott lép közbe, ahol tényleg
+        kellene az idő.</div>
+      <label class="lbl">magyar sor</label>
+      <div class="seg" id="segHu">
+        <button data-k="split">alul, felezve</button>
+        <button data-k="pin">gombok felett</button>
+        <button data-k="hide">rejtve</button>
+      </div>
+      <div class="note">Felezve: felül fut az angol, alul a magyar — a képernyő két
+        rögzített fele, a fordítás betűmérete a panelhez igazodik, hogy a mondat
+        mindig egészben látszódjon.</div>
+    </div>
+
+    <div class="card" id="engTog" style="cursor:pointer">
+      <h3 style="margin-bottom:0">Motorok és kulcsok<em>felismerés + fordítás · egyszeri
+        beállítás — koppints a nyitáshoz</em></h3>
+    </div>
+    <div id="engWrap" class="hid">
     <div class="card">
       <h3>Beszédfelismerés<em>ez alakítja a hangot szöveggé</em></h3>
       <label class="lbl">szolgáltató</label>
@@ -677,44 +729,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
       <div class="note" id="trNote"></div>
     </div>
 
-    <div class="card">
-      <h3>Megjelenés<em>hallgatás közben</em></h3>
-      <label class="lbl">betűméret</label>
-      <input type="range" id="kFs" min="1.0" max="2.2" step="0.05">
-      <div class="note">aktuális mondat: <b id="vFs"></b></div>
-      <label class="lbl">betűtípus</label>
-      <div class="seg" id="segFont">
-        <button data-k="lit">Literata</button>
-        <button data-k="dm">DM Sans</button>
-        <button data-k="atk">Atkinson</button>
-      </div>
-      <div class="note" id="fontNote"></div>
-      <label class="lbl">kezelők elrejtése hallgatás közben</label>
-      <div class="seg" id="segImm">
-        <button data-k="5">5 mp után</button>
-        <button data-k="10">10 mp után</button>
-        <button data-k="0">soha</button>
-      </div>
-      <div class="note">Elrejtve az egész képernyő szöveg lesz, és koppintással
-        vezérelhető: a bal és a jobb szél mondatot léptet (szünetben is), a közepe
-        szüneteltet, a felső harmad visszahozza a kezelőket.</div>
-      <label class="lbl">olvasási ráhagyás</label>
-      <div class="seg" id="segBreath"></div>
-      <div class="note">Ahol a magyar hosszabb, mint amennyi idő alatt az angol
-        elhangzik, a mondat végén egy lélegzetnyi szünetet tart, hogy végig tudd
-        olvasni. A hang sebességéhez nem nyúl, és csak ott lép közbe, ahol tényleg
-        kellene az idő.</div>
-      <label class="lbl">magyar sor</label>
-      <div class="seg" id="segHu">
-        <button data-k="split">alul, felezve</button>
-        <button data-k="pin">gombok felett</button>
-        <button data-k="hide">rejtve</button>
-      </div>
-      <div class="note">Felezve: felül fut az angol, alul a magyar — a képernyő két
-        rögzített fele, a fordítás betűmérete a panelhez igazodik, hogy a mondat
-        mindig egészben látszódjon.</div>
     </div>
-
     <div class="card">
       <h3>Költség<em>eddig ebben a böngészőben</em></h3>
       <div id="cost" class="note" style="font-family:var(--mono);line-height:1.7"></div>
@@ -904,7 +919,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v55';
+const APP_VER='v56';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -4512,6 +4527,15 @@ $('pPlay').onclick=()=>{ breathCancel(false); if(!A.src&&!A.isYt) return toast('
 $('pPrev').onclick=()=>{ breathCancel(false); gotoSen(CUR<=0?0:CUR-1) };
 $('pNext').onclick=()=>{ breathCancel(false); gotoSen(CUR+1) };
 const RATES=[0.7,0.85,1,1.15,1.3];
+/* v56: a motor/kulcs-blokk csak kérésre nyílik; kulcs nélkül (első beállítás)
+   nyitva indul, hogy meglegyen az út */
+$('engTog').onclick=()=>{ $('engWrap').classList.toggle('hid') };
+if(!CFG.asrKey) $('engWrap').classList.remove('hid');
+
+/* v56: a behúzó telefonon csukva indul — ritka művelet ne foglalja a könyvtárat */
+if(matchMedia('(hover:none)').matches) $('intake').classList.add('closed');
+$('intakeTog').onclick=()=>$('intake').classList.toggle('closed');
+
 $('pRate').onclick=()=>{
   const i=(RATES.indexOf(CFG.rate)+1)%RATES.length;
   CFG.rate=RATES[i]; A.playbackRate=CFG.rate; saveCfg();
@@ -4645,9 +4669,9 @@ function setCover(rec){
   if(el&&c){
     try{
       COVURL=URL.createObjectURL(new Blob([c.b],{type:c.mime||'image/jpeg'}));
-      el.style.backgroundImage=
-        'linear-gradient(180deg,rgba(11,10,14,.50),rgba(11,10,14,.72) 55%,rgba(11,10,14,.96)),'+
-        'url("'+COVURL+'")';
+      /* v56: NINCS sötétítő réteg a borítón — a buborékok saját fekete alapja
+         (chipek, kártya) adja a kontrasztot, a kép hadd éljen */
+      el.style.backgroundImage='url("'+COVURL+'")';
     }catch(e){ COVURL='' }
   }else if(el) el.style.backgroundImage='';
   document.body.classList.toggle('hascover',!!COVURL);
@@ -5424,8 +5448,12 @@ function bkCard(r,part){
   /* a csempe szűk: EGY rövid mono sor. Ami rendben van, arról nem írunk (a 100%-os
      feldolgozás nem hír); csak ami hiányzik vagy folyamatban van. */
   const mark=(r.kind==='yt')?' · YT':(r.hasAudio?'':' · hang ✗');
+  /* v56: a 0% nem hír — jelvény csak akkor, ha tényleg folyamatban van; szöveg
+     nélküli felvételnél a hiányt mondjuk ki (a „hang ✗" mintájára) */
+  const nincsSzoveg=!(r.sen&&r.sen.length);
   el.querySelector('span').innerHTML=esc(fmtT(r.dur))+(pos?' · '+pos+'%':'')+
-    (pct<99?' · <span class="pill part">'+pct+'%</span>':'')+mark;
+    (pct>0&&pct<99?' · <span class="pill part">'+pct+'%</span>'
+      :(pct<=0&&nincsSzoveg?' · szöveg ✗':''))+mark;
   el.onclick=()=>openRec(r);
   el.querySelector('.more').onclick=e=>{ e.stopPropagation(); sheetItem(r) };
   /* nyitott listában: kivétel egy koppintással — a felvétel MEGMARAD a könyvtárban */

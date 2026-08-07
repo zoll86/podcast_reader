@@ -13,6 +13,11 @@ olvasás helyett hallgatás.
 
 ## Mit tud
 
+- **Kényelem és design (v55–v56)**: listába tétel a könyvtári kártyáról is;
+  a borító filter nélkül (a kontrasztot a buborékok alapja adja); a Behúzás
+  telefonon csukva indul; a beállításokban a mindennapi (Megjelenés) elöl, a
+  motorok/kulcsok egy csukható „egyszeri beállítás" csoportban; nagyobb ⋯
+  találati felület, kevesebb jelvény-zaj.
 - **Egy gombos rendbetétel + olvasási ráhagyás (v54)**: a ⋯ menü hat
   javítóeszköze egyetlen „szöveg rendbetétele" gombbá csukódott, ami előbb
   diagnosztizál, aztán jóváhagyással javít. Az olvasási ráhagyás ott tart

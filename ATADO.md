@@ -1,5 +1,14 @@
 ---
 
+# KIEGÉSZÍTÉS — v55–v56: KÉNYELEM ÉS DESIGN
+
+v55: „listába…" a könyvtári kártya ⋯ menüjébe (eddig csak a lejátszóból ment).
+v56: borító sötétítő rétegei le (a kontraszt a buborékok alapjáé); #intake
+csukható (érintőn csukva indul); vSet átrendezve (Megjelenés elöl, motorok
+#engWrap csukható csoportban, kulcs nélkül nyitva); .bk .more 40px; 0% jelvény
+helyett „szöveg ✗" csak ott, ahol tényleg nincs szöveg. Részletek:
+VALTOZASOK_v56.md.
+
 # KIEGÉSZÍTÉS — v54: EGYSZERŰSÍTÉS + OLVASÁSI ÉLMÉNY
 
 A ⋯ menü SZÖVEG szakasza 10 → 4 pont: a hat javítóeszköz a textDoctor
