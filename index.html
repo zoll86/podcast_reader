@@ -367,6 +367,7 @@ body.pinhu .sen.cur .hu{display:none}
   padding:var(--sp4) var(--sp4) max(var(--sp5),env(safe-area-inset-bottom));
   box-shadow:var(--shadow);animation:up .28s var(--spring)}
 @keyframes up{from{transform:translateY(30px);opacity:.4}to{transform:none;opacity:1}}
+#sheetBox .grab{touch-action:none;padding:10px 0 6px;margin:-10px 0 0;cursor:grab}
 #sheetBox h3{margin:0 0 var(--sp3);font-size:var(--t4);font-weight:500}
 #sheetBox .col button{text-align:left}
 .shHead{font-size:var(--t1);letter-spacing:.09em;text-transform:uppercase;
@@ -923,7 +924,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v58';
+const APP_VER='v62';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -4235,7 +4236,7 @@ async function followTick(){
   if(!MED){
     if(!FILE){
       if(Date.now()-FOLLOW_WARN>60000){ FOLLOW_WARN=Date.now();
-        toast('a kísérő módhoz kell a hangfájl — húzd be újra a könyvtárban',5000) }
+        askAudio(REC) }                  /* v62: a hiány helyén a megoldás */
       return;
     }
     try{ await prepMedia() }catch(e){ log('kísérő: előkészítés:',e); return }
@@ -4525,7 +4526,14 @@ document.addEventListener('click',e=>{
 },true);
 
 /* ---- lejátszó gombok ---- */
-$('pPlay').onclick=()=>{ breathCancel(false); if(!A.src&&!A.isYt) return toast('nincs betöltve hang');
+$('pPlay').onclick=()=>{ breathCancel(false);
+  if(!A.src&&!A.isYt){
+    /* v62: a play a felhasználó kifejezett szándéka — nem magyarázunk,
+       hanem egyből nyitjuk a fájlválasztót (a koppintás gesztusa engedi) */
+    if(REC){ ONEFILE=true; $('file').click();
+      toast('válaszd ki a hangfájlt — a szöveg és a pozíció megmarad',4500); return }
+    return toast('nincs betöltve hang');
+  }
   A.paused?A.play().catch(e=>toast('nem indul: '+e.message)):A.pause() };
 $('pPrev').onclick=()=>{ breathCancel(false); gotoSen(CUR<=0?0:CUR-1) };
 $('pNext').onclick=()=>{ breathCancel(false); gotoSen(CUR+1) };
@@ -4702,6 +4710,7 @@ async function openRec(rec,fileMaybe){
   }
   REC=rec; CUR=-1; loopA=loopB=null; MED=null;
   document.body.classList.add('playing');
+  armBack&&armBack();     /* v61: a lejátszó is réteg — a vissza a könyvtárba lép */
   setHdrVar();
   setCover(rec);
   $('hTitle').querySelector('b').textContent=rec.name;
@@ -4756,11 +4765,27 @@ async function openRec(rec,fileMaybe){
   }else{
     A.removeAttribute('src'); FILE=null;
     log('nincs hang a tárolóban:',rec.id,'hasAudio='+(rec.hasAudio||0),'darab='+(rec.ach||0));
-    toast('a hang nem szerepel a tárolóban — húzd be újra a fájlt',5000);
+    askAudio(rec);                       /* v62: a hiány helyén a megoldás */
   }
   renderKara(false); renderHu(true); drawSeek();
 }
 let FILE=null;
+/* ======== v62: A HIÁNY HELYÉN A MEGOLDÁS ========
+   Eddig a hang nélküli felvétel megnyitása egy zsákutca-toastot adott
+   („húzd be újra a fájlt") — de OTT semmilyen behúzási lehetőség nem volt:
+   a behúzó a könyvtárban lakik, telefonon ráadásul össze is van csukva.
+   A szabály: ahol a program hiányt közöl, ott adja a megoldást is. Ez a lap
+   egyetlen koppintással a fájlválasztót nyitja; a kiválasztott fájl a meglévő
+   szöveghez és pozícióhoz párosul (az azonosító a fájlból számolódik, tehát
+   ugyanaz a fájl ugyanahhoz a felvételhez talál vissza). */
+function askAudio(rec){
+  sheet(rec&&rec.name||'nincs hang',[
+    {note:'Ehhez a felvételhez nincs hang a készüléken — a szöveg és a pozíció '+
+      'megvan. Válaszd ki a hangfájlt, és összepárosítom.'},
+    {t:'hangfájl választása most',pri:1,fn:()=>{ ONEFILE=true; $('file').click() }},
+    {t:'később',fn:()=>{}}
+  ]);
+}
 async function prepMedia(){
   if(MED||!FILE) return MED;
   MED=await openMedia(FILE,m=>progSet(1,'előkészítés',m));
@@ -4787,11 +4812,15 @@ function show(id){
   document.body.classList.remove('playing');
   $('karaWrap').scrollTop=0;
   if(id==='vSet'){ drawCost(); drawStore(); drawLog(); drawBank() }
-  if(id==='vLib') drawLib();
+  if(id==='vLib'){ drawLib(); disarmBack&&disarmBack() }
+  /* v61: a fejléc-gomb ne hazudjon állapotot — a könyvtárban nincs hova
+     „könyvtárazni", ilyenkor halvány és tétlen */
+  const b=$('bLib'); if(b){ b.disabled=(id==='vLib'); b.style.opacity=(id==='vLib')?.35:1 }
 }
 $('bLib').onclick=()=>{ if(document.body.classList.contains('playing')) closeRec(); else show('vLib') };
-$('bSet').onclick=()=>{ if(document.body.classList.contains('playing')){ A.pause() } show('vSet') };
-$('bSet2').onclick=()=>show('vSet');
+addEventListener('load',()=>{ const b=$('bLib'); if(b&&$('vLib').classList.contains('on')){ b.disabled=true; b.style.opacity=.35 } });
+$('bSet').onclick=()=>{ if(document.body.classList.contains('playing')){ A.pause() } show('vSet'); armBack() };
+$('bSet2').onclick=()=>{ show('vSet'); armBack() };
 
 /* --- fájl behúzás --- */
 $('drop').onclick=()=>$('file').click();
@@ -4912,6 +4941,7 @@ async function addYt(url){
 }
 $('ytAdd').onclick=()=>{ const v=$('ytUrl').value.trim(); if(v){ $('ytUrl').value=''; addYt(v) } };
 $('ytUrl').addEventListener('keydown',e=>{ if(e.key==='Enter') $('ytAdd').onclick() });
+$('fdUrl').addEventListener('keydown',e=>{ if(e.key==='Enter') $('fdGo').onclick() });
 $('ytMin').onclick=()=>{
   document.body.classList.toggle('ytmin');
   $('ytMin').textContent=document.body.classList.contains('ytmin')?'videó megjelenítése':'videó összecsukása';
@@ -5069,6 +5099,17 @@ async function sheetQueue(lid){
       }}});
   });
   items.push({head:'lista'});
+  /* v59: tömeges felvétel — minden listán kívüli felvétel ebbe a listába */
+  (function(){
+    const kinn=recs.filter(r=>!inAnyList(r.id));
+    if(!kinn.length) return;
+    items.push({t:'minden listán kívüli felvétel ide ('+kinn.length+' db, név szerint)',fn:()=>{
+      kinn.sort((a,b)=>String(a.name||'').localeCompare(String(b.name||''),'hu',{numeric:true}));
+      kinn.forEach(r=>listAdd(l.id,r.id));
+      drawLib(); toast(kinn.length+' felvétel a(z) „'+l.name+'" listába',4500);
+      sheetQueue(l.id);
+    }});
+  })();
   /* v58: a polcon a lista kibontva is nézhető — ugyanaz a csempés borítónézet,
      mint kinn. (A kártyán a „N rész" pöttyre koppintva is ez vált.) */
   items.push({t:l.open?'borítónézet elrejtése a polcon':'borítónézet a polcon (részek csempéi)',
@@ -5124,9 +5165,21 @@ async function sheetAddTo(rec){
   const items=[];
   if(cur) items.push({t:'kivétel a(z) „'+cur.name+'" listából',pri:1,
     fn:()=>{ listRemove(rec.id); drawLib(); toast('kivéve'); closeSheet() }});
+  /* v59: TÖMEGES út — tucatnyi behúzott rész után nem lehet elvárás az
+     egyenkénti pakolás. A számláló a listán kívülieket mutatja. */
+  let kinn=[];
+  try{ kinn=(await txtAll()).filter(r=>!inAnyList(r.id)) }catch(e){}
   lists().filter(l=>l!==cur).forEach(l=>items.push({
     t:'→ '+l.name+' ('+l.items.length+')',
-    fn:()=>{ listAdd(l.id,rec.id); drawLib(); toast('felvéve: '+l.name); closeSheet() }}));
+    fn:()=>{ listAdd(l.id,rec.id); drawLib(); toast('felvéve: '+l.name); closeSheet() },
+    x:kinn.length>1?{t:'mind',title:'minden listán kívüli felvétel ide',fn:()=>{
+      kinn.sort((a,b)=>String(a.name||'').localeCompare(String(b.name||''),'hu',{numeric:true}));
+      kinn.forEach(r=>listAdd(l.id,r.id));
+      drawLib(); closeSheet();
+      toast(kinn.length+' felvétel a(z) „'+l.name+'" listába',4500);
+    }}:null}));
+  if(kinn.length>1) items.push({t:'minden listán kívüli felvétel egy ÚJ listába ('+kinn.length+' db)',
+    fn:qFillAll});
   items.push({t:'új lista ebből',fn:()=>{
     const n=prompt('az új lista neve:',String(rec.name||'lista').replace(/[\s\-–_#.:,0-9]+$/,'').trim()||'lista');
     if(n&&n.trim()){ const l=listNew(n.trim(),[rec.id]); listAdd(l.id,rec.id);
@@ -5253,9 +5306,11 @@ function fdRemember(url,title){
   list.unshift({u:url,t:title||url});
   CFG.feeds=list.slice(0,8); saveCfg(); fdDrawSaved();
 }
-$('fdOpen').onclick=()=>{ $('feed').classList.add('on'); fdDrawSaved();
+$('fdOpen').onclick=()=>{ $('feed').classList.add('on'); armBack(); fdDrawSaved();
   if(!$('fdUrl').value&&(CFG.feeds||[]).length) $('fdUrl').value=CFG.feeds[0].u };
-$('fdNo').onclick=()=>$('feed').classList.remove('on');
+$('fdNo').onclick=()=>{ $('feed').classList.remove('on'); disarmBack() };
+/* v61: a feed-ablak a dobozon KÍVÜLI koppintásra is záródik — mint minden réteg */
+$('feed').onclick=e=>{ if(e.target.id==='feed'){ $('feed').classList.remove('on'); disarmBack() } };
 async function fdShow(url,allowProxy){
   $('fdList').innerHTML='<div class="note">betöltés…</div>';
   let fd=null;
@@ -5497,7 +5552,8 @@ function bkListCard(l,met,byId){
   const kesz=met.filter(r=>r.dur&&r.pos>=r.dur-8).length;
   el.querySelector('.bar i').style.width=pct+'%';
   el.querySelector('b').textContent=l.name;
-  el.querySelector('.cnt').textContent=met.length+' rész';
+  /* v61: a pötty kapcsoló — mutassa is (nyíl az állapot szerint) */
+  el.querySelector('.cnt').textContent=met.length+' rész '+(l.open?'▴':'▾');
   el.querySelector('span').innerHTML=fmtT(dur)+' · '+pct+'% · '+
     '<span class="pill'+(kesz===met.length?' ok':(kesz?' part':''))+'">'+
     kesz+'/'+met.length+'</span>';
@@ -5635,7 +5691,7 @@ function sheet(title,items){
        tehát a lista részeire csak a lejátszás jutott — a kivételhez külön lapra
        kellett menni. A másodlagos gomb NEM zárja be a lapot, mert tipikusan több
        elemet akar az ember egymás után elvégezni. */
-    if(it.x){
+    if(it.x&&it.x.fn){
       const row=document.createElement('div'); row.className='shRow';
       const xb=document.createElement('button');
       xb.className='shX'; xb.textContent=it.x.t||'✕';
@@ -5647,9 +5703,55 @@ function sheet(title,items){
     b.appendChild(btn);
   });
   $('sheet').classList.add('on');
+  armBack();
 }
-const closeSheet=()=>$('sheet').classList.remove('on');
+const closeSheet=()=>{ const bx=$('sheetBox');
+  bx.style.transition=''; bx.style.transform='';
+  $('sheet').classList.remove('on'); disarmBack&&disarmBack() };
 $('sheet').onclick=e=>{ if(e.target.id==='sheet') closeSheet() };
+
+/* ======== v60: A LAP LEHÚZHATÓ ========
+   A fogantyú-csík eddig csak dísz volt: azt ígérte, hogy megfogható (ez a
+   szabványos bottom-sheet gesztus), de nem történt semmi. Most: a lap a
+   fogantyúnál/címnél mindig, a törzsénél pedig a tetejére görgetett állapotban
+   húzható lefelé — 90 px vagy egy gyors pöccintés után becsukódik, különben
+   visszaugrik. A koppintás a lapon kívülre továbbra is zár. */
+(function(){
+  const bx=$('sheetBox');
+  let y0=0,dy=0,t0=0,drag=false,fromTop=false;
+  bx.addEventListener('touchstart',e=>{
+    const t=e.touches[0]; y0=t.clientY; dy=0; t0=Date.now();
+    fromTop=!!e.target.closest('.grab, h3');
+    drag=fromTop;                       /* a fogantyún azonnal fogja */
+  },{passive:true});
+  bx.addEventListener('touchmove',e=>{
+    const t=e.touches[0]; const d=t.clientY-y0;
+    if(!drag){
+      /* a törzsön: csak a tetejéről, lefelé indulva vesszük át a gesztust */
+      if(bx.scrollTop<=0&&d>6){ drag=true; y0=t.clientY; return }
+      return;
+    }
+    dy=Math.max(0,t.clientY-y0);
+    if(dy>0) e.preventDefault();
+    bx.style.transition='none';
+    bx.style.transform='translateY('+dy+'px)';
+  },{passive:false});
+  bx.addEventListener('touchend',()=>{
+    if(!drag) return;
+    drag=false;
+    const gyors=dy/(Date.now()-t0)>0.5;
+    if(dy>90||(gyors&&dy>30)){
+      bx.style.transition='transform .18s ease-in';
+      bx.style.transform='translateY(110%)';
+      setTimeout(closeSheet,180);
+    }else{
+      bx.style.transition='transform .2s var(--spring)';
+      bx.style.transform='';
+      setTimeout(()=>{ bx.style.transition='' },220);
+    }
+    dy=0;
+  },{passive:true});
+})();
 const isYtRec=()=>!!(REC&&REC.kind==='yt'&&REC.ytid);
 $('pMore').onclick=()=>{
   const gap=REC?nextGap(REC.done,0,REC.dur||1e9):null;
@@ -6360,7 +6462,39 @@ async function checkUpdate(silent){
 }
 $('bUpd').onclick=()=>checkUpdate(false);
 setTimeout(()=>checkUpdate(true),4000);
+/* ======== v61: A VISSZA-GOMB A RÉTEGEKET ZÁRJA, NEM AZ APPOT ========
+   A platform legerősebb gesztus-ígérete: Androidon a vissza mindig egy
+   szinttel lép ki. Eddig a program nem tudott róla — a vissza a nyitott
+   ⋯ lap, a feed-ablak vagy a lejátszó helyett az EGÉSZ appból lépett ki.
+   Egy őr-állapotot teszünk a history-ba, amikor réteg nyílik; a vissza a
+   legfelső réteget zárja (lap → feed → lejátszó → beállítások), és ha még
+   maradt réteg, újra felhúzza az őrt. Ha semmi nincs nyitva, a vissza a
+   megszokott módon kiléphet. */
+let GB=false;
+const anyLayer=()=>$('sheet').classList.contains('on')||
+  $('feed').classList.contains('on')||
+  document.body.classList.contains('playing')||
+  $('vSet').classList.contains('on');
+function armBack(){ if(!GB){ try{ history.pushState({kh:1},'') }catch(e){}; GB=true } }
+function disarmBack(){ if(GB&&!anyLayer()){ GB=false; try{ history.back() }catch(e){} } }
+addEventListener('popstate',()=>{
+  GB=false;
+  if($('sheet').classList.contains('on')) closeSheet();
+  else if($('feed').classList.contains('on')) $('feed').classList.remove('on');
+  else if(document.body.classList.contains('playing')) closeRec();
+  else if($('vSet').classList.contains('on')) show('vLib');
+  else return;                      /* nincs réteg: mehet a kilépés */
+  if(anyLayer()) armBack();
+});
+
 addEventListener('keydown',e=>{
+  /* v61: Esc = ugyanaz, mint a vissza — a legfelső réteget zárja */
+  if(e.key==='Escape'){
+    if($('sheet').classList.contains('on')) return closeSheet();
+    if($('feed').classList.contains('on')) return $('feed').classList.remove('on');
+    if(document.body.classList.contains('playing')) return closeRec();
+    if($('vSet').classList.contains('on')) return show('vLib');
+  }
   if(!document.body.classList.contains('playing')) return;
   if(e.target.tagName==='INPUT'||e.target.tagName==='TEXTAREA') return;
   if(e.code==='Space'){ e.preventDefault(); $('pPlay').click() }
