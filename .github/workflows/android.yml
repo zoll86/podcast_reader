@@ -1,0 +1,68 @@
+# ============================================================================
+# KÉTNYELVŰ HALLGATÓ — APK-építés a felhőben
+# Minden push után a GitHub megépíti a telepíthető Android-appot, és felteszi
+# a Releases oldalra "apk-latest" néven. Android Studio nem kell sehol.
+# ============================================================================
+name: Android APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch: {}      # kézzel is indítható az Actions fülről
+
+permissions:
+  contents: write            # a Release feltöltéséhez
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: 17 }
+
+      # -- a webapp fájljai a Capacitor www mappájába --
+      - name: Web fájlok összegyűjtése
+        run: |
+          mkdir -p www
+          cp index.html sw.js manifest.webmanifest www/
+          cp -r icons www/
+
+      # -- Capacitor: az Android-projektet ITT generáljuk, nem a repóban tartjuk --
+      - name: Capacitor telepítése és Android-projekt generálása
+        run: |
+          npm install
+          npx cap add android
+          npx cap sync android
+
+      # -- ikonok a meglévő 512-es PWA-ikonból --
+      - name: App-ikonok generálása
+        run: |
+          mkdir -p assets
+          cp icons/icon-512.png assets/logo.png
+          cp icons/icon-512.png assets/logo-dark.png
+          npx @capacitor/assets generate --android || echo "ikon-generálás kihagyva"
+          npx cap sync android
+
+      - name: APK építése
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+
+      - name: APK átnevezése
+        run: cp android/app/build/outputs/apk/debug/app-debug.apk ketnyelvu-hallgato.apk
+
+      # -- kiadás: mindig ugyanaz a "apk-latest" címke, friss APK-val --
+      - name: Release frissítése
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: apk-latest
+          name: "Kétnyelvű hallgató — legfrissebb APK"
+          body: "Automatikus építés. Töltsd le a .apk fájlt, engedélyezd az ismeretlen forrást, telepítsd."
+          files: ketnyelvu-hallgato.apk
+          prerelease: false
