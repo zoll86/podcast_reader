@@ -636,6 +636,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
         <div class="row" style="margin-bottom:var(--sp2)">
           <button class="mini" id="folderPick">mappa kijelölése</button>
           <button class="mini" id="folderScan">újraolvasás</button>
+          <button class="mini" id="folderLists">almappák → listák</button>
           <button class="mini" id="folderForget">mappa elfelejtése</button>
         </div>
         <div class="note" id="folderInfo">Jelöld ki a podcast-mappádat: onnantól a
@@ -984,7 +985,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v68';
+const APP_VER='v69';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -4931,6 +4932,8 @@ async function folderScan(csendben){
     await folderDraw();
     if(!csendben) toast(FOLDER.length+' hangfájl a mappában',3500);
     log('mappa:',FOLDER.length,'hangfájl');
+    /* v69: az almappákból magától listát épít (csak a meglévő felvételekből) */
+    folderLists(true).catch(e=>log('almappa-lista:',e));
   }catch(e){ log('mappa-olvasás:',e);
     if(!csendben) toast('a mappa nem olvasható — jelöld ki újra',4500) }
 }
@@ -4945,7 +4948,10 @@ async function folderDraw(){
     if((f.folder||'')!==elozo){
       elozo=f.folder||'';
       if(elozo){ const g=document.createElement('div'); g.className='fGrp';
-        g.textContent=elozo; box.appendChild(g) }
+        /* v69: az almappa a lista neve is — jelezzük, hogy hova kerül */
+        const l=lists().find(x=>String(x.name||'').toLowerCase()===folderListName(elozo).toLowerCase());
+        g.textContent=elozo+(l?'  ·  lista ('+l.items.length+')':'');
+        box.appendChild(g) }
     }
     const id=(f.name||'hang').replace(/\.[^.]+$/,'').replace(/\s+/g,' ').trim().slice(0,70)+'|'+f.size;
     const k=kesz[id];
@@ -5000,6 +5006,55 @@ async function safAttach(rec,f){
   return true;
 }
 
+/* ======== v69: ALMAPPA = LISTA ========
+   A mappában sorozatonként külön alkönyvtárak vannak — ez a rendezés maga a
+   szándék, tehát a program vegye át: minden almappa egy lejátszási lista lesz,
+   a benne lévő részekkel, név szerint rendezve. A behúzás (a felvétel
+   létrehozása) nem kell hozzá: a listába csak azok kerülnek be, amelyeknek már
+   van felvétele; a többi bekerül, amikor megnyitod őket a mappából.
+   A meglévő listákat NEM bántjuk: ha egy almappa nevű lista már van, abba
+   fűzzük be a még hiányzó részeket. */
+function folderListName(ut){
+  const r=String(ut||'').split('/').filter(Boolean);
+  return r.length?r[r.length-1]:'';       /* a legmélyebb almappa neve */
+}
+async function folderLists(csendben){
+  if(!MAPPA) return 0;
+  if(!(FOLDER||[]).length) await folderScan(true);
+  let recs=[];
+  try{ recs=await txtAll() }catch(e){ return 0 }
+  const byId={}; recs.forEach(r=>{ byId[r.id]=r });
+  /* almappa → a benne lévő, MÁR meglévő felvételek azonosítói (név szerint) */
+  const csop={};
+  for(const f of FOLDER){
+    const nev=folderListName(f.folder);
+    if(!nev) continue;                     /* a gyökérben lévők nem listásak */
+    const id=safId(f);
+    if(!byId[id]) continue;                /* ehhez még nincs felvétel */
+    (csop[nev]=csop[nev]||[]).push({id:id,nev:f.name||''});
+  }
+  let ujLista=0, ujElem=0;
+  for(const nev of Object.keys(csop).sort((a,b)=>a.localeCompare(b,'hu'))){
+    const tag=csop[nev].sort((a,b)=>a.nev.localeCompare(b.nev,'hu',{numeric:true}));
+    let l=lists().find(x=>String(x.name||'').toLowerCase()===nev.toLowerCase());
+    if(!l){ l=listNew(nev,[]); ujLista++ }
+    for(const t of tag){
+      const hol=listOf(t.id);
+      if(hol&&hol.id!==l.id) continue;      /* máshova tette a felhasználó — hagyjuk */
+      if(l.items.indexOf(t.id)<0){ l.items.push(t.id); ujElem++ }
+    }
+    l.at=Date.now();
+  }
+  if(ujLista||ujElem){
+    saveCfg(); drawLib();
+    if(!csendben) toast(ujLista+' lista az almappákból · '+ujElem+' rész besorolva',5000);
+    log('almappa→lista:',ujLista,'lista,',ujElem,'rész');
+  }else if(!csendben){
+    toast('az almappákból nincs mit besorolni (előbb nyisd meg a részeket a mappából)',6000);
+  }
+  return ujElem;
+}
+
 /* Megnyitás a mappából: nincs másolás, nincs behúzás. */
 async function folderOpen(f){
   if(JOB.on||RT) return toast('előbb fejezd be a futó feldolgozást');
@@ -5008,11 +5063,14 @@ async function folderOpen(f){
     if(!SRV) return toast('a mappa-kiszolgáló nem indult el');
     const file=safFile(f);
     await addFile(file,{folder:true});
+    /* v69: ha almappából jött, egyből a megfelelő listába kerül */
+    if(f.folder) folderLists(true).catch(e=>log('almappa-lista:',e));
   }catch(e){ log('mappa-megnyitás:',e);
     toast('nem sikerült megnyitni: '+String(e.message).slice(0,110),6000) }
 }
 $('folderPick').onclick=folderPick;
 $('folderScan').onclick=()=>folderScan();
+$('folderLists').onclick=()=>folderLists(false);
 $('folderForget').onclick=async()=>{
   if(!confirm('Elfelejtsem a mappát? A fájlok és a felismert szövegek megmaradnak.')) return;
   try{ await MAPPA.forget() }catch(e){}
