@@ -46,6 +46,58 @@ public class MappaPlugin extends Plugin {
     private static final String PREF = "mappa_prefs";
     private static final String KEY_TREE = "tree_uri";
 
+    /* ======== SÖTÉT RENDSZERSÁVOK (natív, a témától függetlenül) ========
+       A navigációs sáv (a képernyő alján) az Android sajátja, nem a weboldal
+       része — CSS-ből elérhetetlen. Ha az app témája nem ad neki színt, a
+       rendszer VILÁGOS alapot használ: fehér csík a sötét olvasófelület alatt.
+       A témába írt szín könnyen kimarad (ha a build-recept nem frissül), ezért
+       itt, kódból is beállítjuk, minden indulásnál. */
+    @Override
+    public void load() {
+        super.load();
+        final android.app.Activity a = getActivity();
+        if (a == null) return;
+        a.runOnUiThread(() -> {
+            try {
+                android.view.Window w = a.getWindow();
+                final int hatter = 0xFF0B0A0E;          /* az app alapszíne */
+                w.getDecorView().setBackgroundColor(hatter);
+                if (android.os.Build.VERSION.SDK_INT >= 21) {
+                    w.setNavigationBarColor(hatter);
+                    w.setStatusBarColor(hatter);
+                }
+                /* a sávok ikonjai VILÁGOSAK legyenek (sötét háttéren) */
+                if (android.os.Build.VERSION.SDK_INT >= 26) {
+                    android.view.View d = w.getDecorView();
+                    int f = d.getSystemUiVisibility();
+                    f &= ~android.view.View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
+                    f &= ~android.view.View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
+                    d.setSystemUiVisibility(f);
+                }
+                /* Android 15-től a fenti szín-hívások hatástalanok lehetnek
+                   (kikényszerített edge-to-edge). Ilyenkor a sáv átlátszó lesz,
+                   és a mögötte lévő sötét felület látszik — ezért a decorView
+                   háttere fekete, és a WebView is sötét alapon fut. */
+                if (android.os.Build.VERSION.SDK_INT >= 35) {
+                    try {
+                        androidx.core.view.WindowCompat.setDecorFitsSystemWindows(w, false);
+                        androidx.core.view.WindowInsetsControllerCompat c =
+                                androidx.core.view.WindowCompat.getInsetsController(w, w.getDecorView());
+                        if (c != null) {
+                            c.setAppearanceLightStatusBars(false);
+                            c.setAppearanceLightNavigationBars(false);
+                        }
+                    } catch (Throwable ignored) { }
+                }
+                if (getBridge() != null && getBridge().getWebView() != null) {
+                    getBridge().getWebView().setBackgroundColor(hatter);
+                }
+            } catch (Throwable e) {
+                /* a megjelenés nem lehet ok az összeomlásra */
+            }
+        });
+    }
+
     private MappaSzerver szerver;
     private String jegy;
     private int port;
