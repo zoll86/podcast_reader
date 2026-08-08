@@ -777,8 +777,15 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
         <input type="password" id="asrKey" placeholder="gsk_… vagy sk-…" autocomplete="off">
         <label class="lbl">végpont</label>
         <input type="text" id="asrUrl" placeholder="https://api.groq.com/openai/v1">
-        <label class="lbl">modell</label>
-        <input type="text" id="asrModel" placeholder="whisper-large-v3-turbo">
+        <label class="lbl">pontosság</label>
+        <div class="seg" id="segAsrModel"></div>
+        <div class="note" id="asrModelNote">A pontos modell (large-v3) kevesebb
+          mondatot hagy ki zajos, zenés, több beszélős felvételnél. A gyors
+          (turbo) 2–3× fürgébb és 3× olcsóbb, de többet kihagy. A „kimaradt
+          mondatok pótlása" mindig a pontossal fut, prompt nélkül — így valóban
+          más eredményt ad, mint az első futam.</div>
+        <label class="lbl">modell (kézzel)</label>
+        <input type="text" id="asrModel" placeholder="whisper-large-v3">
         <div class="row" style="margin-top:var(--sp3)">
           <button class="btn" id="asrTest">próba</button>
           <span class="note" id="asrNote" style="margin:0"></span>
@@ -1026,7 +1033,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v74';
+const APP_VER='v76';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -1805,9 +1812,21 @@ async function cut(M,t0,t1){
 </script>
 <script>
 /* ============ [4] beszédfelismerés ============ */
+/* v76: PONTOS vs GYORS felismerő modell.
+   A kihagyott mondatok fő oka a modell volt: a turbo 12% szóhiba-arányon
+   dolgozik, a large-v3 10,3%-on — és a large-v3 kifejezetten a nehéz
+   helyzetekre készült (háttérzaj, akcentus, szakszó), ami pont a podcast.
+   Ár: 0,111 $/óra a 0,04 helyett, vagyis egy 25 perces rész 17 Ft 6 helyett.
+   Ezért az ALAP mostantól a pontos modell. */
+const ASRMODEL={
+  'whisper-large-v3':{n:'pontos (large-v3)',usdHour:0.111,
+    note:'zaj, akcentus, több beszélő — a legkevesebb kihagyás'},
+  'whisper-large-v3-turbo':{n:'gyors (turbo)',usdHour:0.04,
+    note:'2-3× gyorsabb és 3× olcsóbb, de többet hagy ki'}
+};
 const ASR={
-  groq:{name:'Groq',url:'https://api.groq.com/openai/v1',model:'whisper-large-v3-turbo',
-        usdHour:0.04, note:'az ingyenes szint ehhez elég (0 Ft); kártyával 10× limit'},
+  groq:{name:'Groq',url:'https://api.groq.com/openai/v1',model:'whisper-large-v3',
+        usdHour:0.111, note:'az ingyenes szint ehhez is elég; kártyával 10× limit'},
   openai:{name:'OpenAI',url:'https://api.openai.com/v1',model:'whisper-1',
         usdHour:0.36, note:'drágább, de sokaknak már van kulcsa'},
   custom:{name:'egyéb',url:'',model:'whisper-1',usdHour:0.10,
@@ -1816,22 +1835,30 @@ const ASR={
 const asrCur=()=>ASR[CFG.asr]||ASR.groq;
 const asrUrl=()=>(CFG.asrUrl||asrCur().url||'').replace(/\/+$/,'');
 const asrModel=()=>CFG.asrModel||asrCur().model;
+/* v76: az óradíj a választott modellhez tartozik (a becsült költséghez) */
+const asrHour=()=>{ const m=ASRMODEL[asrModel()]; return m?m.usdHour:(asrCur().usdHour||0.111) };
 
 /* A `temp` a hézagkeresés miatt paraméter: a nulla hőmérséklet determinisztikus,
    tehát ugyanarra a hangra ugyanazt a HALLGATÁST adja — amit egyszer elhagyott, azt
    másodszor is elhagyná. Egy kicsit megemelve más dekódolási úton indul el. */
-async function asrCall(blob,fileName,secs,hintPrev,temp){
+async function asrCall(blob,fileName,secs,hintPrev,temp,opts){
   if(!CFG.asrKey) throw new Error('nincs megadva a felismerő kulcsa (⚙ Beállítások)');
   const url=asrUrl(); if(!url) throw new Error('nincs megadva a felismerő végpontja');
+  opts=opts||{};
   const fd=new FormData();
   fd.append('file',blob,fileName);
-  fd.append('model',asrModel());
+  /* v76: a pótló futam MÁS modellt kérhet — ez a lényeg, lásd lentebb */
+  fd.append('model',opts.model||asrModel());
   fd.append('response_format','verbose_json');
   fd.append('language','en');
   fd.append('temperature',String(temp==null?0:temp));
   fd.append('timestamp_granularities[]','segment');
   if(CFG.words) fd.append('timestamp_granularities[]','word');
-  if(hintPrev) fd.append('prompt',hintPrev.slice(-200));
+  /* v76: a pótló futam PROMPT NÉLKÜL fut. A Whisper adott bemenetre
+     determinisztikus: ugyanazzal a modellel és prompttal ugyanazt hagyja ki —
+     ezért az eddigi „második átfutás" gyakran semmit nem talált. A prompt
+     elhagyása és a más modell viszont valóban más eredményt ad. */
+  if(hintPrev&&!opts.noPrompt) fd.append('prompt',hintPrev.slice(-200));
   const r=await fetch(url+'/audio/transcriptions',{method:'POST',
     headers:{'Authorization':'Bearer '+CFG.asrKey}, body:fd});
   if(!r.ok){
@@ -1841,7 +1868,11 @@ async function asrCall(blob,fileName,secs,hintPrev,temp){
     throw e;
   }
   const d=await r.json();
-  spend.asrSec+=secs||0; saveSpend();
+  spend.asrSec+=secs||0;
+  /* v76: ha a pótló futam drágább modellt használt, azt külön is beszámítjuk */
+  if(opts.model&&ASRMODEL[opts.model]&&ASRMODEL[opts.model].usdHour>asrHour())
+    spend.asrExtra=(spend.asrExtra||0)+(secs||0)*(ASRMODEL[opts.model].usdHour-asrHour())/3600;
+  saveSpend();
   return d;
 }
 
@@ -2988,7 +3019,7 @@ const passCalls=ranges=>ranges.reduce((n,r)=>n+Math.max(1,Math.ceil((r[1]-r[0])/
    végigkérdezi újra — de kizárólag HOZZÁTENNI tud. Amit a `passKeep` ismétlésnek lát,
    az eldobódik; a meglévő mondatokhoz és a meglévő magyar szöveghez semmi nem nyúl,
    és csak az új mondatok lesznek lefordítva. */
-async function runPass(rec,M,ranges,cim,minLen){
+async function runPass(rec,M,ranges,cim,minLen,opts){
   if(JOB.on){ toast('már fut egy feldolgozás'); return }
   ranges=(ranges||[]).filter(r=>r&&r[1]-r[0]>0.8);
   if(!ranges.length){ toast('nincs mit újra átfutni'); return }
@@ -3013,7 +3044,9 @@ async function runPass(rec,M,ranges,cim,minLen){
           log('átfutás: a szelet túl nagy — kisebb szeletméret kell'); continue }
         let d=null;
         for(let att=0;att<3&&!JOB.stop;att++){
-          try{ d=await asrCall(piece.blob,piece.name,piece.t1-piece.t0,gapHint(rec,a),0.2); break }
+          try{ d=await asrCall(piece.blob,piece.name,piece.t1-piece.t0,
+                 (opts&&opts.noPrompt)?'':gapHint(rec,a),
+                 (opts&&opts.temp!=null)?opts.temp:0.2, opts||{}); break }
           catch(e){
             log('átfutás-felismerés',e.status||'',String(e.message).slice(0,150));
             if(e.status===401||e.status===403) throw e;
@@ -3628,10 +3661,23 @@ function sheetNew(ujak){
 }
 /* a hézagokra szűkített változat megmarad: ha VAN elég nagy néma folt, azt olcsóbb
    csak ott megkérdezni */
+/* v76: A PÓTLÓ FUTAM MÁS BEÁLLÍTÁSOKKAL FUT — ez a lényeg.
+   A Whisper adott bemenetre determinisztikus: ha ugyanazzal a modellel és
+   prompttal kérdezzük újra ugyanazt a szakaszt, ugyanazt hagyja ki. Ezért a
+   pótlás mostantól: (1) a PONTOS modellel (ha az alap a gyors turbo volt),
+   (2) PROMPT NÉLKÜL, (3) nulla hőmérséklettel. Így valóban más a válasz, és a
+   kimaradt mondatok nagy része előkerül. */
+function passOpts(){
+  const o={noPrompt:true,temp:0};
+  if(asrModel()==='whisper-large-v3-turbo') o.model='whisper-large-v3';
+  return o;
+}
 const runGaps=(rec,M,minGap)=>{
   const gs=senGaps(rec,minGap);
   if(!gs.length){ toast('nincs elég nagy néma folt — próbáld a második átfutást',5000); return }
-  return runPass(rec,M,gs,'kimaradt mondatok',0.5);
+  const o=passOpts();
+  if(o.model) log('pótlás a pontos modellel:',o.model);
+  return runPass(rec,M,gs,'kimaradt mondatok',0.5,o);
 };
 async function runJob(rec,M,from,to,opts){
   opts=opts||{};
@@ -6774,6 +6820,7 @@ function sheetChaps(){
 /* A második átfutás indítása egy helyen: a ⋯ menü és a „mit ismerjünk fel?" lap is
    ezt hívja. Feltétel csak az, ami nélkül fizikailag nem megy: kulcs és hang. */
 async function passRange(a,b){
+  /* v76: a második átfutás is más beállításokkal — különben ugyanazt adja */
   if(!REC) return;
   if(!CFG.asrKey){ show('vSet'); return toast('előbb add meg a felismerő kulcsát') }
   if(!FILE) return toast('húzd be újra a hangfájlt a könyvtárban');
@@ -6803,7 +6850,7 @@ async function sheetProcess(){
       }};
   sheet('mit ismerjünk fel?',[kis,
     {note:'A felismerés '+asrCur().name+'-en fut. A Groq ingyenes szintje ehhez elég '+
-      '(0 Ft); fizetős szinten ~'+(asrCur().usdHour*HUF).toFixed(0)+' Ft/óra. Minden '+
+      '(0 Ft); fizetős szinten ~'+(asrHour()*HUF).toFixed(0)+' Ft/óra. Minden '+
       'szelet után mentünk, a munka bármikor megszakítható és folytatható; ha a '+
       'szolgáltató lassít (429), a program vár és magától folytatja. A „második '+
       'átfutás" újra végigkérdezi a szakaszt, és csak HOZZÁTESZ: amit eddig '+
@@ -6821,14 +6868,16 @@ async function sheetProcess(){
       /* ha van elég nagy néma folt, ott olcsóbb csak azt megkérdezni */
       const gs=senGaps(REC,GAP_MIN);
       if(!gs.length) return null;
-      return {t:'csak a néma foltok ('+gs.length+' hézag · '+fmtT(gapSec(gs))+
-        ' · ~'+passCalls(gs)+' kérés)',fn:()=>goGaps()};
+      return {t:'kimaradt mondatok pótlása'+
+        (asrModel()==='whisper-large-v3-turbo'?' (pontos modellel)':'')+
+        ' — '+gs.length+' hézag · '+fmtT(gapSec(gs))+' · ~'+passCalls(gs)+' kérés',
+        pri:1,fn:()=>goGaps()};
     })(),
     {t:'innentől 10 perc',fn:()=>go(t,Math.min(dur,t+600))},
     {t:'innentől 30 perc',fn:()=>go(t,Math.min(dur,t+1800))},
     {t:'innentől a végéig',fn:()=>go(t,dur)},
   ]);
-  const goPass=(a,b)=>passRange(a,b);
+  const goPass=(a,b)=>passRange(a,b);   /* v76: passRange is a pótló beállításokkal fut */
   async function goGaps(){
     try{ await prepMedia() }
     catch(e){ return toast('a hang szerkezete nem olvasható: '+e.message,5000) }
@@ -7251,6 +7300,17 @@ function segFill(el,items,cur,fn){
   });
 }
 function drawSet(){
+  /* v76: pontosság-választó (a Groq két Whisper-modellje) */
+  {
+    const el=$('segAsrModel'), n=$('asrModelNote');
+    const groq=CFG.asr==='groq'||/api\.groq\.com/.test(asrUrl());
+    if(el){
+      el.classList.toggle('hid',!groq); n&&n.classList.toggle('hid',!groq);
+      if(groq) segFill(el,[['whisper-large-v3','pontos'],['whisper-large-v3-turbo','gyors']],
+        asrModel(),k=>{ CFG.asrModel=k; saveCfg(); drawSet(); drawCost&&drawCost();
+          toast(k==='whisper-large-v3'?'pontos modell — kevesebb kihagyás':'gyors modell',3500) });
+    }
+  }
   segFill($('segAsr'),Object.keys(ASR).map(k=>[k,ASR[k].name]),CFG.asr,k=>{
     CFG.asr=k; CFG.asrUrl=ASR[k].url; CFG.asrModel=ASR[k].model; saveCfg(); drawSet() });
   $('asrKey').value=CFG.asrKey; $('asrUrl').value=CFG.asrUrl||ASR[CFG.asr].url;
@@ -7338,7 +7398,7 @@ $('asrTest').onclick=async()=>{
   }
 };
 function drawCost(){
-  const h=spend.asrSec/3600, aUsd=h*asrCur().usdHour;
+  const h=spend.asrSec/3600, aUsd=h*asrHour()+(spend.asrExtra||0);
   const m=MODELS[CFG.clModel]||MODELS.haiku;
   const tUsd=CFG.tr==='free'?0:(spend.tin/1e6*m[2]+spend.tout/1e6*m[3]);
   $('cost').innerHTML=
