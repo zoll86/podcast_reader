@@ -1,29 +1,75 @@
 # ============================================================================
-# KÉTNYELVŰ HALLGATÓ — APK-építés a felhőben
-# Minden push után a GitHub megépíti a telepíthető Android-appot, és felteszi
-# a Releases oldalra "apk-latest" néven. Android Studio nem kell sehol.
+# KÉTNYELVŰ HALLGATÓ — APK-építés a felhőben, ÁLLANDÓ ALÁÍRÁSSAL
+#
+# Miért fontos az aláírás: az Android csak akkor tekint egy APK-t az előző
+# FRISSÍTÉSÉNEK (és őrzi meg az adatokat: könyvtár, fordítások, listák,
+# kulcsok), ha ugyanazzal a kulccsal van aláírva. A GitHub gépe minden
+# futásnál új „debug" kulcsot csinálna — ezért minden build más aláírást
+# kapott, és a telepítéshez le kellett volna törölni az appot, az adatokkal
+# együtt.
+#
+# A megoldás: az első futás legenerál egy kulcstárat, és VISSZAÍRJA a repóba
+# (signing/hallgato.keystore). Minden későbbi build ezt használja, tehát az
+# APK-k egymás frissítései lesznek. A kulcs a szabványos Android-fejlesztői
+# („debug") jelszavakat használja, mert a Gradle ezeket keresi magától:
+# így egyetlen sort sem kell a projektben módosítani.
+#
+# Tudni való: a kulcstár a repóban van, ami nyilvános. Ez sideload-hoz
+# (Play Store nélküli telepítéshez) elfogadható, mert a kulcs nem ad hozzáférést
+# semmihez — csak azt jelenti, hogy más is tudna ezzel aláírt APK-t készíteni.
+# Ha valaha a Play Store-ba kerülne az app, akkor ehelyett GitHub Secretbe
+# tett kulcs kell (azt viszont neked kell beállítanod, jelszót nem kezelek).
 # ============================================================================
 name: Android APK
 
 on:
   push:
     branches: [ main, master ]
-  workflow_dispatch: {}      # kézzel is indítható az Actions fülről
+  workflow_dispatch: {}
 
 permissions:
-  contents: write            # a Release feltöltéséhez
+  contents: write            # a Release feltöltéséhez ÉS a kulcstár megőrzéséhez
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: true     # kell, hogy a kulcstárat vissza tudjuk írni
 
       - uses: actions/setup-node@v4
         with: { node-version: 20 }
 
       - uses: actions/setup-java@v4
         with: { distribution: temurin, java-version: 17 }
+
+      # -- ÁLLANDÓ ALÁÍRÓ KULCS: első futáskor létrejön és bekerül a repóba --
+      - name: Állandó aláíró kulcs
+        run: |
+          set -e
+          if [ ! -f signing/hallgato.keystore ]; then
+            echo "Nincs kulcstar - letrehozom, es megorzom a repoban."
+            mkdir -p signing
+            keytool -genkeypair -v \
+              -keystore signing/hallgato.keystore \
+              -storepass android -keypass android \
+              -alias androiddebugkey \
+              -keyalg RSA -keysize 2048 -validity 10950 \
+              -dname "CN=Ketnyelvu hallgato, OU=zoll86, O=zoll86, L=Budapest, C=HU"
+            git config user.name  "github-actions"
+            git config user.email "github-actions@users.noreply.github.com"
+            git add signing/hallgato.keystore
+            git commit -m "Allando APK-alairo kulcs (a frissitesek adatvesztes nelkul telepednek)"
+            git push
+            echo "ELSO FUTAS: a kulcs elkeszult."
+          else
+            echo "Megvan az allando kulcstar, ezzel irjuk ala."
+          fi
+          mkdir -p ~/.android
+          cp signing/hallgato.keystore ~/.android/debug.keystore
+          keytool -list -v -keystore ~/.android/debug.keystore -storepass android \
+            | grep -E "SHA256|Alias|Valid" || true
 
       # -- a webapp fájljai a Capacitor www mappájába --
       - name: Web fájlok összegyűjtése
@@ -38,6 +84,21 @@ jobs:
           npm install
           npx cap add android
           npx cap sync android
+          grep -q "mappa-plugin" android/capacitor.settings.gradle \
+            && echo "OK: a Mappa-plugin regisztralva" \
+            || (echo "HIBA: a Mappa-plugin nem kerult be" && exit 1)
+
+      # -- SÖTÉT RENDSZERSÁVOK: a nav-sáv fehér csíkja ellen --
+      - name: Sötét rendszersávok
+        run: |
+          F=android/app/src/main/res/values/styles.xml
+          if [ -f "$F" ] && ! grep -q navigationBarColor "$F"; then
+            sed -i 's|<item name="windowNoTitle">true</item>|<item name="windowNoTitle">true</item>\n        <item name="android:statusBarColor">#0B0A0E</item>\n        <item name="android:navigationBarColor">#0B0A0E</item>\n        <item name="android:windowLightStatusBar">false</item>\n        <item name="android:windowLightNavigationBar">false</item>|' "$F"
+            echo "sotet savok beirva"
+          else
+            echo "styles.xml hianyzik vagy mar be van allitva"
+          fi
+          cat "$F" || true
 
       # -- ikonok a meglévő 512-es PWA-ikonból --
       - name: App-ikonok generálása
@@ -45,7 +106,7 @@ jobs:
           mkdir -p assets
           cp icons/icon-512.png assets/logo.png
           cp icons/icon-512.png assets/logo-dark.png
-          npx @capacitor/assets generate --android || echo "ikon-generálás kihagyva"
+          npx @capacitor/assets generate --android || echo "ikon-generalas kihagyva"
           npx cap sync android
 
       - name: APK építése
@@ -55,14 +116,24 @@ jobs:
           ./gradlew assembleDebug --no-daemon
 
       - name: APK átnevezése
-        run: cp android/app/build/outputs/apk/debug/app-debug.apk ketnyelvu-hallgato.apk
+        run: |
+          cp android/app/build/outputs/apk/debug/app-debug.apk ketnyelvu-hallgato.apk
+          VER=$(grep -o "APP_VER='v[0-9]*'" index.html | head -1 | grep -o "v[0-9]*")
+          echo "verzio: $VER" > apk-verzio.txt
+          echo "APK: $(du -h ketnyelvu-hallgato.apk | cut -f1)"
 
-      # -- kiadás: mindig ugyanaz a "apk-latest" címke, friss APK-val --
       - name: Release frissítése
         uses: softprops/action-gh-release@v2
         with:
           tag_name: apk-latest
-          name: "Kétnyelvű hallgató — legfrissebb APK"
-          body: "Automatikus építés. Töltsd le a .apk fájlt, engedélyezd az ismeretlen forrást, telepítsd."
-          files: ketnyelvu-hallgato.apk
+          name: "Ketnyelvu hallgato - legfrissebb APK"
+          body: |
+            Automatikus epites. Toltsd le a .apk fajlt es telepitsd.
+
+            Az APK allando kulccsal van alairva, ezert a kovetkezo verziok
+            FRISSITESKENT telepednek: a konyvtar, a forditasok, a listak, a
+            haladas es a kulcsok megmaradnak.
+          files: |
+            ketnyelvu-hallgato.apk
+            apk-verzio.txt
           prerelease: false
