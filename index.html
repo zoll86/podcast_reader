@@ -519,6 +519,14 @@ body.learn .hs.cur{font-size:calc(var(--kfs) * 1.5)}
 .fGrp span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .fGrp em{font-style:normal;color:var(--faint);flex:none}
 
+/* v74: kijelölés a mappa-listában */
+.fRow.sel{border-color:var(--gold);background:rgba(212,168,83,.14)}
+.fRow.sel .fn{color:var(--gold)}
+body.picking .fRow{position:relative}
+body.picking .fRow:before{content:'';flex:none;width:16px;height:16px;border-radius:4px;
+  border:1.5px solid var(--line2);margin-right:2px}
+body.picking .fRow.sel:before{background:var(--gold);border-color:var(--gold)}
+#fPickBar{gap:6px;flex-wrap:wrap}
 /* ---------- immerzív mód ----------
    Hallgatás közben a fejléc és a kezelősáv néhány másodperc után elhalványul, és
    a teljes képernyő szöveg lesz. A vezérlés ilyenkor koppintás-zónákra vált:
@@ -659,6 +667,13 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
           benne lévő hangfájlok itt jelennek meg, és egy koppintással megnyithatók —
           behúzás és másolás nélkül. A mappát a rendszer választója engedélyezi,
           és a jog újraindítás után is megmarad.</div>
+        <div class="row hid" id="fPickBar" style="margin-top:var(--sp3);align-items:center">
+          <span id="fPickN" class="note" style="flex:1;min-width:0">koppints a sorokra</span>
+          <button class="mini" id="fPickAll">mind</button>
+          <button class="mini" id="fPickNone">egy sem</button>
+          <button class="btn sm" id="fPickGo">listába</button>
+          <button class="mini" id="fPickOff">kész</button>
+        </div>
         <div id="folderList" style="margin-top:var(--sp3)"></div>
       </div>
     </div>
@@ -734,6 +749,9 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
       <div class="note">Elrejtve az egész képernyő szöveg lesz, és koppintással
         vezérelhető: a bal és a jobb szél mondatot léptet (szünetben is), a közepe
         szüneteltet, a felső harmad visszahozza a kezelőket.</div>
+      <div class="row hid" id="setBackRow" style="margin-bottom:var(--sp3)">
+        <button class="btn" id="setBack">◀ vissza a szöveghez</button>
+      </div>
       <label class="lbl">magyar sor</label>
       <div class="seg" id="segHu">
         <button data-k="split">alul, felezve</button>
@@ -1008,7 +1026,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v72';
+const APP_VER='v74';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -3407,7 +3425,19 @@ async function backupLoad(txt){
   }catch(e){ log('visszaállítás:',e);
     toast('a visszaállítás megállt: '+String(e.message).slice(0,110),6000) }
 }
-function backupPick(){
+async function backupPick(){
+  /* v73: natív appban a rendszer fájlválasztóját kérjük a pluginon keresztül —
+     a WebView beépített <input type=file> útja nem mindig ad tartalmat */
+  if(typeof MAPPA!=='undefined'&&MAPPA&&MAPPA.pickText){
+    try{
+      const r=await MAPPA.pickText();
+      if(r&&r.text) return backupLoad(r.text);
+      return toast('a fájl üres volt',4000);
+    }catch(e){
+      log('mentés választása (natív):',e);
+      if(/nem valasztottal/i.test(String(e.message||''))) return;
+    }
+  }
   const i=document.createElement('input');
   i.type='file'; i.accept='.json,application/json';
   i.onchange=async()=>{
@@ -5108,10 +5138,127 @@ async function folderDraw(){
     if(k&&k.n){ const d=document.createElement('div'); d.className='fd';
       d.textContent=(k.dur&&k.pos)?Math.round(k.pos/k.dur*100)+'%':'szöveg ✓';
       row.appendChild(d) }
-    row.onclick=()=>folderOpen(f);
+    row.dataset.uri=f.uri;
+    /* v74: hosszú nyomás → kijelölő mód; utána a koppintás jelöl */
+    let nyom=0;
+    const start=()=>{ clearTimeout(nyom); nyom=setTimeout(()=>{
+      nyom=0;
+      if(!PICKMODE){ pickSet(true); PICKED.add(f.uri); pickDraw();
+        if(navigator.vibrate) try{ navigator.vibrate(14) }catch(e){}
+        toast('kijelölő mód — koppints a többire is',3500) }
+    },450) };
+    const stop=()=>{ clearTimeout(nyom); nyom=0 };
+    row.addEventListener('touchstart',start,{passive:true});
+    row.addEventListener('touchend',stop,{passive:true});
+    row.addEventListener('touchmove',stop,{passive:true});
+    row.addEventListener('mousedown',start);
+    row.addEventListener('mouseup',stop);
+    row.addEventListener('mouseleave',stop);
+    row.onclick=()=>{ if(PICKMODE) return pickToggle(f.uri); folderOpen(f) };
     box.appendChild(row);
   }
+  pickDraw();
 }
+/* ======== v74: KIJELÖLÉS A MAPPÁBAN — a könyvtár egy mozdulattal ========
+   Hosszú nyomás egy soron: bekapcsol a kijelölő mód. Utána a koppintás
+   kijelöl/kivesz, és egy fejlécsáv jelenik meg: hányat jelöltél ki, „mind",
+   „egy sem", és a fő művelet: „listába". A lista neve alapból az almappa
+   (ha egy almappából jelöltél), különben kérjük.
+
+   A művelet a részeket EGYENKÉNT megnyitja a mappából (ez hozza létre a
+   felvételt: hosszt, borítót olvas), majd listába fűzi őket — de NEM indít
+   felismerést egyikre sem. Így pár koppintással megvan a teljes könyvtár és a
+   listák; a felismerést utána sorra indítod, amelyiket hallgatod. */
+let PICKMODE=false;
+const PICKED=new Set();
+function pickSet(on){
+  PICKMODE=!!on;
+  if(!PICKMODE) PICKED.clear();
+  const bar=$('fPickBar'); if(bar) bar.classList.toggle('hid',!PICKMODE);
+  document.body.classList.toggle('picking',PICKMODE);
+  pickDraw();
+}
+function pickDraw(){
+  const box=$('folderList'); if(!box) return;
+  box.querySelectorAll('.fRow').forEach(r=>{
+    r.classList.toggle('sel',PICKED.has(r.dataset.uri));
+  });
+  const n=PICKED.size, c=$('fPickN');
+  if(c) c.textContent=n?(n+' kijelölve'):'koppints a sorokra';
+  const b=$('fPickGo'); if(b) b.disabled=!n;
+}
+function pickToggle(uri){
+  if(PICKED.has(uri)) PICKED.delete(uri); else PICKED.add(uri);
+  pickDraw();
+}
+function pickAll(on){
+  PICKED.clear();
+  if(on) for(const f of (FOLDER||[])) PICKED.add(f.uri);
+  pickDraw();
+}
+/* a kijelöltek behúzása a könyvtárba + listába fűzése */
+async function pickToList(){
+  if(!PICKED.size) return;
+  if(JOB.on||RT) return toast('előbb fejezd be a futó feldolgozást');
+  const kij=(FOLDER||[]).filter(f=>PICKED.has(f.uri));
+  if(!kij.length) return;
+  /* melyik listába? — ha mind egy almappából van, az a lista neve */
+  const mappak=[...new Set(kij.map(f=>folderListName(f.folder)).filter(Boolean))];
+  let nev=mappak.length===1?mappak[0]:'';
+  if(!nev){
+    nev=prompt('A '+kij.length+' rész melyik listába kerüljön?\n'+
+      '(a meglévő nevét beírva abba fűzöm)','új lista');
+    if(nev==null) return;
+    nev=String(nev).trim(); if(!nev) return;
+  }
+  if(!confirm(kij.length+' rész felvétele a könyvtárba, és a(z) „'+nev+'" listába fűzése.\n\n'+
+    'A hang a mappában marad, felismerést most nem indítok — azt utána egyenként te indítod. '+
+    'Folytatom?')) return;
+  JOB.on=true; JOB.stop=false;
+  progShow(true); $('progHide').classList.add('hid'); $('progStop').textContent='szüneteltetés';
+  let l=lists().find(x=>String(x.name||'').toLowerCase()===nev.toLowerCase());
+  if(!l) l=listNew(nev,[]);
+  let db=0, hiba=0;
+  try{
+    await srvReady();
+    /* név szerint, számhelyesen — a listában is ez lesz a sorrend */
+    kij.sort((a,b)=>String(a.name||'').localeCompare(String(b.name||''),'hu',{numeric:true}));
+    for(let i=0;i<kij.length;i++){
+      if(JOB.stop) break;
+      const f=kij[i];
+      progSet(2+i/kij.length*95,'felvétel a könyvtárba',(i+1)+' / '+kij.length+' · '+
+        String(f.name||'').slice(0,40));
+      try{
+        const id=safId(f);
+        let rec=null;
+        try{ rec=await txtGet(id) }catch(e){}
+        if(!rec){
+          /* új felvétel: a hangot a mappából olvassuk, csak a hosszához */
+          const file=safFile(f);
+          rec=await addFile(file,{quiet:true,audio:false});
+        }
+        if(rec){
+          const hol=listOf(rec.id);
+          if(!hol||hol.id===l.id){
+            if(l.items.indexOf(rec.id)<0) l.items.push(rec.id);
+          }
+          db++;
+        }
+      }catch(e){ hiba++; log('kijelölt felvétel ('+f.name+'):',e) }
+    }
+    l.at=Date.now(); saveCfg(); drawLib(); await folderDraw();
+    progSet(100,'kész',db+' rész a(z) „'+nev+'" listában'+(hiba?' · '+hiba+' hiba':''));
+    $('progStop').textContent='újra'; $('progHide').classList.remove('hid');
+    log('kijelölés→lista:',db,'rész,',hiba,'hiba, lista:',nev);
+    toast(db+' rész a(z) „'+nev+'" listában — a felismerést egyenként indíthatod',7000);
+    pickSet(false);
+  }catch(e){
+    log('kijelölés→lista:',e);
+    progSet(99,'megállt',String(e.message).slice(0,150));
+    $('progStop').textContent='újra'; $('progHide').classList.remove('hid');
+  }finally{ JOB.on=false }
+}
+
 /* ======== v67: A MAPPA MINDEN FELVÉTELHEZ MEGTALÁLJA A HANGOT ========
    A v63-ban a mappa-hivatkozás (rec.saf) csak akkor került a felvételbe, ha
    a mappa-listából nyitottad meg. A korábban behúzott felvételeknél nem volt
@@ -5216,6 +5363,10 @@ async function folderOpen(f){
 $('folderPick').onclick=folderPick;
 $('folderScan').onclick=()=>folderScan();
 $('folderLists').onclick=()=>folderLists(false);
+$('fPickAll').onclick=()=>pickAll(true);
+$('fPickNone').onclick=()=>pickAll(false);
+$('fPickGo').onclick=()=>pickToList();
+$('fPickOff').onclick=()=>pickSet(false);
 $('bkSave').onclick=backupSave;
 /* v71: natív appban látszik a közvetlen APK-letöltés is */
 addEventListener('load',()=>{ if(NATIV) $('bApk').classList.remove('hid') });
@@ -5552,7 +5703,8 @@ function show(id){
   document.querySelectorAll('.view').forEach(v=>v.classList.toggle('on',v.id===id));
   document.body.classList.remove('playing');
   $('karaWrap').scrollTop=0;
-  if(id==='vSet'){ drawCost(); drawStore(); drawLog(); drawBank() }
+  if(id==='vSet'){ drawCost(); drawStore(); drawLog(); drawBank();
+    const r=$('setBackRow'); if(r) r.classList.toggle('hid',!REC) }
   if(id==='vLib'){ drawLib(); disarmBack&&disarmBack() }
   libBtn();
 }
@@ -5568,9 +5720,16 @@ function libBtn(){
   const konyvtarban=$('vLib').classList.contains('on')&&!jatszik;
   b.disabled=konyvtarban;
   b.style.opacity=konyvtarban?.35:1;
-  b.textContent=jatszik?'könyvtár':'könyvtár';
+  /* v73: a beállításokból KÖZVETLENÜL vissza a felvételhez — a betűméretet épp
+     azért állítja az ember, hogy a szövegen lássa a hatását */
+  b.textContent=($('vSet').classList.contains('on')&&REC)?'vissza a szöveghez':'könyvtár';
 }
-$('bLib').onclick=()=>{ if(document.body.classList.contains('playing')) closeRec(); else show('vLib') };
+$('bLib').onclick=()=>{
+  if(document.body.classList.contains('playing')) return closeRec();
+  if($('vSet').classList.contains('on')&&REC)
+    return openRec(REC).catch(e=>{ log('visszalépés a szöveghez:',e); show('vLib') });
+  show('vLib');
+};
 addEventListener('load',libBtn);
 $('bSet').onclick=()=>{ if(document.body.classList.contains('playing')){ A.pause() } show('vSet'); armBack() };
 $('bSet2').onclick=()=>{ show('vSet'); armBack() };
@@ -6184,8 +6343,11 @@ async function addFile(file,opts){
   if(opts.quiet){
     /* tömeges behúzás: csak felvesszük a könyvtárba, nem nyitjuk meg és nem
        indítunk feldolgozást — a hang mentése (ha kérted) a háttérben fut */
+    /* v74: mappából behúzva a hivatkozás is bekerül — a hangot így később
+       kérdés nélkül megtalálja, és NEM másolunk semmit a készülékre */
+    if(file.saf){ rec.saf=file.saf; rec.hasAudio=0; rec.ach=0 }
     await save(rec);
-    if(opts.audio!==false) bgSaveAudio(rec,file);
+    if(opts.audio!==false&&!file.saf) bgSaveAudio(rec,file);
     return rec;
   }
   progSet(32,'megnyitás',fmtT(rec.dur)+' hang megnyitva');
@@ -6998,7 +7160,29 @@ $('fileTxt').onchange=async e=>{
 };
 const askImport=rec=>{ importTarget=rec; $('fileTxt').click() };
 
+/* v73: A KIVITEL A NATÍV APPBAN a podcast-mappába ír.
+   A WebView-ben a böngészős letöltés (blob + rejtett <a download>) csendben
+   elhal: a program kiírta, hogy „felirat kiírva", de fájl nem keletkezett —
+   és így a mentés-átvitel sem működött, ami épp a lényeg volt. A natív app
+   ezért a kijelölt mappába írja a kimenetet: ott megtalálja a fájlkezelő, és
+   vissza is tölthető. Böngészőben minden marad a régiben. */
 function dl(name,text){
+  if(typeof MAPPA!=='undefined'&&MAPPA&&MAPPA.writeText){
+    const mime=/\.json$/i.test(name)?'application/json':
+               /\.tsv$/i.test(name)?'text/tab-separated-values':'text/plain';
+    MAPPA.writeText({name:name,text:String(text),mime:mime})
+      .then(r=>{ log('kiírva a mappába:',r.name,r.bytes,'bájt');
+        toast('a mappába mentve: '+r.name+
+          ' ('+Math.max(1,Math.round((r.bytes||0)/1024))+' kB)',6000) })
+      .catch(e=>{ log('kiírás a mappába:',e);
+        try{
+          const b=new Blob([text],{type:'text/plain;charset=utf-8'});
+          const u=URL.createObjectURL(b), a=document.createElement('a');
+          a.href=u; a.download=name; a.click(); setTimeout(()=>URL.revokeObjectURL(u),4000);
+          toast('a letöltésekbe került (mappa nélkül)',6000);
+        }catch(x){ toast('nem sikerült kiírni: '+String(e.message).slice(0,110),7000) } });
+    return;
+  }
   const b=new Blob([text],{type:'text/plain;charset=utf-8'});
   const u=URL.createObjectURL(b), a=document.createElement('a');
   a.href=u; a.download=name; a.click(); setTimeout(()=>URL.revokeObjectURL(u),4000);

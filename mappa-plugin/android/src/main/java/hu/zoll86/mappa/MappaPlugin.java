@@ -354,6 +354,83 @@ public class MappaPlugin extends Plugin {
 
     /* ---------- segéd ---------- */
 
+    /* ---------- FÁJL ÍRÁSA a mappába (kivitel, mentés) ----------
+       A WebView-ben a böngészős letöltés (blob + <a download>) nem működik:
+       a felhasználó „felirat kiírva" üzenetet látott, de fájl nem keletkezett.
+       Ezért a natív app a kijelölt podcast-mappába írja a kimenetet — ott
+       megtalálja a fájlkezelő is, és vissza is tölthető. */
+    @PluginMethod
+    public void writeText(PluginCall call) {
+        final String nev = call.getString("name", "kimenet.txt");
+        final String tartalom = call.getString("text", "");
+        final String mime = call.getString("mime", "text/plain");
+        final String treeS = getContext().getSharedPreferences(PREF, 0).getString(KEY_TREE, null);
+        if (treeS == null) { call.reject("nincs kijelolt mappa"); return; }
+        OutputStream os = null;
+        try {
+            Uri tree = Uri.parse(treeS);
+            Uri dir = DocumentsContract.buildDocumentUriUsingTree(
+                    tree, DocumentsContract.getTreeDocumentId(tree));
+            Uri cel = DocumentsContract.createDocument(
+                    getContext().getContentResolver(), dir, mime, nev);
+            if (cel == null) { call.reject("nem sikerult letrehozni a fajlt a mappaban"); return; }
+            os = getContext().getContentResolver().openOutputStream(cel);
+            os.write(tartalom.getBytes("UTF-8"));
+            os.flush();
+            JSObject r = new JSObject();
+            r.put("uri", cel.toString());
+            r.put("name", nev);
+            r.put("bytes", tartalom.getBytes("UTF-8").length);
+            call.resolve(r);
+        } catch (Exception e) {
+            call.reject("iras hiba: " + e.getMessage());
+        } finally {
+            try { if (os != null) os.close(); } catch (Exception ignored) { }
+        }
+    }
+
+    /* ---------- FÁJL VÁLASZTÁSA ÉS BEOLVASÁSA (visszaállítás) ---------- */
+    @PluginMethod
+    public void pickText(PluginCall call) {
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        i.setType("*/*");
+        i.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{
+                "application/json", "text/plain", "text/tab-separated-values",
+                "application/x-subrip", "text/*"});
+        startActivityForResult(call, i, "pickTextResult");
+    }
+
+    @ActivityCallback
+    private void pickTextResult(PluginCall call, ActivityResult result) {
+        if (call == null) return;
+        Intent data = result.getData();
+        Uri uri = (data != null) ? data.getData() : null;
+        if (uri == null) { call.reject("nem valasztottal fajlt"); return; }
+        InputStream in = null;
+        try {
+            in = getContext().getContentResolver().openInputStream(uri);
+            if (in == null) { call.reject("a fajl nem nyithato meg"); return; }
+            java.io.ByteArrayOutputStream bo = new java.io.ByteArrayOutputStream();
+            byte[] buf = new byte[65536];
+            int n;
+            long ossz = 0;
+            while ((n = in.read(buf)) > 0) {
+                bo.write(buf, 0, n);
+                ossz += n;
+                if (ossz > 64L * 1024 * 1024) break;   /* mentes-fajl sosem ekkora */
+            }
+            JSObject r = new JSObject();
+            r.put("text", bo.toString("UTF-8"));
+            r.put("bytes", ossz);
+            call.resolve(r);
+        } catch (Exception e) {
+            call.reject("olvasasi hiba: " + e.getMessage());
+        } finally {
+            try { if (in != null) in.close(); } catch (Exception ignored) { }
+        }
+    }
+
     private String szepNev(Uri tree) {
         try {
             String id = DocumentsContract.getTreeDocumentId(tree);
