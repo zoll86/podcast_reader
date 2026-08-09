@@ -795,6 +795,15 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
       <input type="range" id="chunkMin" min="1" max="10" step="1">
       <div class="note">Egy kérésbe ennyi hang megy. <b id="vChunk"></b> — a 25 MB-os
         korlát miatt 10 percnél hosszabb szelet ritkán fér bele.</div>
+      <label class="lbl">hang-előkészítés</label>
+      <div class="seg" id="segPcm">
+        <button data-k="1">javított (WAV)</button>
+        <button data-k="0">nyers szelet</button>
+      </div>
+      <div class="note">A javított út a szeletet a készüléken dekódolja: mintapontos
+        vágás csendhatáron, a halk beszéd felerősítése (AGC), 16 kHz-es WAV megy ki.
+        A halk vagy zene alatti mondatok kihagyása ellen ez a leghatásosabb. Ha egy
+        régi készüléken akadozna, itt visszaváltható a nyers szeletküldés.</div>
       <label class="lbl">szóhatárok</label>
       <div class="seg" id="segWords">
         <button data-k="1">szó szerinti követés</button>
@@ -1033,7 +1042,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v82';
+const APP_VER='v83';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -1089,7 +1098,7 @@ addEventListener('unhandledrejection',e=>{
 
 /* beállítások egyetlen objektumban, hogy egy helyen legyen mentve */
 var CFG=Object.assign({
-  asr:'groq', asrKey:'', asrUrl:'', asrModel:'', chunkMin:5, words:1,
+  asr:'groq', asrKey:'', asrUrl:'', asrModel:'', chunkMin:5, words:1, pcm:1,
   tr:'free', clKey:'', clModel:'haiku', oaiUrl:'https://api.moonshot.ai/v1', oaiKey:'', oaiModel:'kimi-k2.6',
   kfs:1.35, font:'lit', huMode:'split', rate:1, keepAudio:1, trMode:'all', follow:0,
   immSec:5, immTip:0, pairs:0, learn:0, weave:1, wDens:1, paged:1, shelf:1,
@@ -1878,6 +1887,142 @@ async function cut(M,t0,t1){
   if(M.kind==='adts') return cutAdts(M,t0,t1);
   return {blob:await safBlob(M.file.slice(0,M.file.size)),
           name:M.file.name||'r.audio',t0:0,t1:M.dur||t1};
+}
+
+/* ======== v83: PCM-ELŐFELDOLGOZÁS ========
+   A kihagyott mondatok három, eddig kezeletlen gyökere ellen:
+
+   1. MP3 BIT-TARTALÉK (bit reservoir): a Layer-III keret hangadata részben a
+      KORÁBBI keretek kihasználatlan helyén ül (main_data_begin visszamutató).
+      A kerethatáron vágott szelet dekódolható, de az első ~0,1–0,5 másodperce
+      torz vagy néma — a pótló ablakok pont a lyuk elejéről indulnak, vagyis
+      eddig pont a visszakérdezett mondat ELEJÉT küldtük el sérülten. Itt a
+      szelet 1,2 mp ráfutással dekódolódik, és a ráfutás MINTÁRA pontosan
+      lekerül: a kimenetbe a tartalék szemete sosem jut be.
+
+   2. HANGERŐ: a Whisper a hangos zene vagy beszéd melletti HALK megszólalást
+      hagyja ki a legkönnyebben (no_speech-nek nézi). A blokkonkénti AGC a halk
+      szakaszt felhozza, a hangosat békén hagyja.
+
+   3. SZELETHATÁR: a nyers vágás vak időpontnál tör — mondat közepén. A PCM-ből
+      megkeressük a célidő előtti legcsendesebb pontot, és ott vágunk: mondat
+      nem esik két szelet közé, így a szelet végi csonka mondat eldobása (és a
+      vele járó veszteség) okafogyottá válik.
+
+   A kimenet 16 kHz-es mono WAV — a Whisper bemenete úgyis ez, tehát minőség
+   nem vész el, a 25 MB-os korlátba pedig 12 percnyi is belefér. Ha a dekódolás
+   bármiért elhasal (öreg WebView, kevés memória), az adott szelet a régi,
+   nyers úton megy ki — a felismerés emiatt nem állhat meg. */
+const PCM_SR=16000;
+async function decode16k(blob){
+  const ab=await blob.arrayBuffer();
+  const ac=new OfflineAudioContext(1,PCM_SR,PCM_SR);   /* a decodeAudioData a
+    szabvány szerint a kontextus rátájára (16 kHz) alakítja a hangot */
+  const buf=await new Promise((res,rej)=>ac.decodeAudioData(ab,res,
+    e=>rej(e||new Error('decodeAudioData'))));
+  const n=buf.length, ch=buf.numberOfChannels, out=new Float32Array(n);
+  for(let c=0;c<ch;c++){ const d=buf.getChannelData(c);
+    for(let i=0;i<n;i++) out[i]+=d[i] }
+  if(ch>1){ const k=1/ch; for(let i=0;i<n;i++) out[i]*=k }
+  return out;
+}
+/* hosszú tartomány dekódolása RÉSZLETEKBEN: egy 10 perces sztereó mp3 natív
+   dekódja egyben több száz MB lenne — 150 mp-es darabokban a csúcs ~90 MB
+   alatt marad. Minden darab ráfutással indul, a ráfutás mintára levágva. */
+const PCM_SUB=150, PCM_PRE=1.2;
+async function decodeRange(M,a,b){
+  const parts=[]; let total=0;
+  for(let x=a;x<b-0.02;x+=PCM_SUB){
+    const y=Math.min(b,x+PCM_SUB);
+    const raw=await cut(M,Math.max(0,x-PCM_PRE),y);
+    const f=await decode16k(raw.blob);
+    let i0=Math.round((x-raw.t0)*PCM_SR); if(i0<0) i0=0;
+    let i1=Math.round((y-raw.t0)*PCM_SR); if(i1>f.length) i1=f.length;
+    if(i1<=i0) continue;
+    parts.push(f.subarray(i0,i1)); total+=i1-i0;
+  }
+  const out=new Float32Array(total); let o=0;
+  for(const p of parts){ out.set(p,o); o+=p.length }
+  return out;                                  /* a 0. minta időpontja: a */
+}
+/* blokkonkénti AGC: 0,4 mp-es blokkok RMS-e a 0,12-es célszintre, legfeljebb
+   6× erősítéssel; a gyakorlatilag néma blokk (zajszint) NEM kap erősítést,
+   különben a szünetek sistergése erősödne fel. A blokkok közt lineáris
+   átmenet van, a csúcs kemény vágással 0,98 alatt marad. */
+function agcF32(f){
+  const B=Math.round(0.4*PCM_SR), nb=Math.max(1,Math.ceil(f.length/B));
+  const g=new Float32Array(nb);
+  for(let k=0;k<nb;k++){
+    let e=0,c=0;
+    for(let i=k*B,end=Math.min(f.length,(k+1)*B);i<end;i+=2){ e+=f[i]*f[i]; c++ }
+    const rms=Math.sqrt(e/Math.max(1,c));
+    g[k]=rms<0.0035?1:Math.min(6,Math.max(1,0.12/rms));
+  }
+  for(let k=1;k<nb-1;k++) g[k]=(g[k-1]+2*g[k]+g[k+1])/4;       /* simítás */
+  for(let i=0;i<f.length;i++){
+    const p=i/B-0.5, k=Math.floor(p);
+    const g0=g[Math.max(0,Math.min(nb-1,k))], g1=g[Math.max(0,Math.min(nb-1,k+1))];
+    const t=Math.min(1,Math.max(0,p-k));
+    let v=f[i]*(g0+(g1-g0)*t);
+    f[i]=v>0.98?0.98:(v<-0.98?-0.98:v);
+  }
+  return f;
+}
+function wavF32(f){
+  const n=f.length, buf=new ArrayBuffer(44+n*2), v=new DataView(buf);
+  const ws=(o,s)=>{ for(let i=0;i<s.length;i++) v.setUint8(o+i,s.charCodeAt(i)) };
+  ws(0,'RIFF'); v.setUint32(4,36+n*2,true); ws(8,'WAVE'); ws(12,'fmt ');
+  v.setUint32(16,16,true); v.setUint16(20,1,true); v.setUint16(22,1,true);
+  v.setUint32(24,PCM_SR,true); v.setUint32(28,PCM_SR*2,true);
+  v.setUint16(32,2,true); v.setUint16(34,16,true); ws(36,'data'); v.setUint32(40,n*2,true);
+  for(let i=0;i<n;i++){ let s=f[i]; s=s<-1?-1:(s>1?1:s);
+    v.setInt16(44+i*2,(s*32767)|0,true) }
+  return new Blob([buf],{type:'audio/wav'});
+}
+/* a célidő előtti legcsendesebb pont (240 ms-os ablak, 80 ms-os lépés).
+   quiet: tényleg csendhatár-e — a szelet átlagszintjéhez képest is halk */
+function quietCutIdx(f,i0,i1){
+  const W=Math.round(0.24*PCM_SR), H=Math.round(0.08*PCM_SR);
+  if(i1-i0<W*2) return null;
+  let best=-1,bestE=Infinity;
+  for(let s=i0;s+W<=i1;s+=H){
+    let e=0; for(let i=s;i<s+W;i+=4) e+=f[i]*f[i];
+    if(e<bestE){ bestE=e; best=s+(W>>1) }
+  }
+  if(best<0) return null;
+  let ge=0; for(let i=0;i<f.length;i+=16) ge+=f[i]*f[i];
+  const gRms=Math.sqrt(ge/Math.ceil(f.length/16));
+  const rms=Math.sqrt(bestE/Math.ceil(W/4));
+  return { i:best, quiet: rms<Math.max(0.004,gRms*0.18) };
+}
+/* okos szeletelő: PCM-út, hibánál automatikusan a régi nyers vágás.
+   snapEnd: a szelet vége a célidő előtti csendhatárra kerül (legfeljebb
+   25 mp-cel előrébb) — a done-könyvelés a TÉNYLEGES piece.t1-ig megy,
+   tehát a lecsípett rész a következő szelet elejeként fut le. */
+let pcmFail=0;
+async function cutSmart(M,a,b,snapEnd){
+  a=Math.max(0,a); if(M.dur) b=Math.min(b,M.dur);
+  const use=CFG.pcm!==0&&M.kind!=='whole'&&pcmFail<3&&(b-a)>1&&(b-a)<720;
+  if(use){
+    try{
+      const f=await decodeRange(M,a,b);
+      if(f.length<PCM_SR*0.4) throw new Error('üres dekód');
+      let i1=f.length, quiet=false;
+      if(snapEnd&&M.dur&&b<M.dur-1){
+        const q=quietCutIdx(f,Math.max(0,f.length-Math.round(25*PCM_SR)),f.length);
+        if(q){ i1=Math.max(Math.round(PCM_SR*0.5),q.i); quiet=q.quiet }
+      }
+      agcF32(f);
+      return {blob:wavF32(f.subarray(0,i1)),name:'r.wav',
+              t0:a,t1:a+i1/PCM_SR,pcm:1,quiet:quiet};
+    }catch(e){
+      pcmFail++;
+      log('hang-előkészítés elhasalt ('+String(e&&(e.message||e.name)||e).slice(0,60)+
+          ') — a szelet a nyers úton megy'+
+          (pcmFail>=3?'; a PCM-út erre a menetre kikapcsolva':''));
+    }
+  }
+  return await cut(M,a,b);
 }
 </script>
 <script>
@@ -3248,7 +3393,7 @@ async function runPass(rec,M,ranges,cim,minLen,opts){
         progSet(Math.round((call-1)/total*100),cim,
           fmtT(a)+' → '+fmtT(b)+' · '+found+' új mondat · '+call+'/'+total+' kérés');
         let piece;
-        try{ piece=await cut(M,a,b) }
+        try{ piece=await cutSmart(M,a,b,false) }
         catch(e){ log('átfutás-szeletelés:',e); continue }
         log('átfutás-szelet '+fmtT(piece.t0)+'–'+fmtT(piece.t1)+' · '+fmtMB(piece.blob.size));
         if(piece.blob.size>24*1024*1024){
@@ -4174,7 +4319,7 @@ async function runHoles(rec,M,holes,cim,opts){
         progSet(Math.min(99,Math.round(call/total*100)),cim,
           fmtT(wa)+' → '+fmtT(wb)+' ('+cimke+') · '+found+' új mondat');
         let piece;
-        try{ piece=await cut(M,wa,wb) }
+        try{ piece=await cutSmart(M,wa,wb,false) }
         catch(e){ log('pótlás-szeletelés:',e); continue }
         if(piece.blob.size>24*1024*1024){
           log('pótlás: a szelet túl nagy ('+fmtMB(piece.blob.size)+')'); continue }
@@ -4292,6 +4437,7 @@ async function runJob(rec,M,from,to,opts){
   const step=Math.max(60,CFG.chunkMin*60);
   const span=to-from;
   let hint='';
+  const qcAll=[];   /* v83: a felismerő minőség-jelei alapján gyanús szakaszok */
   try{
     while(!JOB.stop){
       const gap=nextGap(rec.done,from,to);
@@ -4301,7 +4447,7 @@ async function runJob(rec,M,from,to,opts){
       const pct=Math.min(99,(doneSec(rec.done.filter(iv=>iv[1]>from&&iv[0]<to))/span)*100);
       progSet(pct,'felismerés',fmtT(t0)+' → '+fmtT(t1)+' · '+rec.sen.length+' mondat');
       let piece;
-      try{ piece=await cut(M,ov,t1) }
+      try{ piece=await cutSmart(M,ov,t1,true) }
       catch(e){ throw new Error('a hang szeletelése nem sikerült: '+e.message) }
       if(piece.blob.size>24*1024*1024)
         throw new Error('a szelet '+fmtMB(piece.blob.size)+', a felismerő 25 MB-ig fogad — '+
@@ -4334,8 +4480,28 @@ async function runJob(rec,M,from,to,opts){
         if(s.w) s.w=s.w.map(x=>Math.min(x,cap));
         return s;
       });
-      /* a szelet végén félbehagyott mondat a következő körben, átfedésből jön */
-      if(t1<to-1&&sen.length>1&&!/[.!?"'”’)\]]$/.test(sen[sen.length-1].en)) sen.pop();
+      /* ======== v83: MINŐSÉG-JELEK a válaszból ========
+         A verbose_json szegmensenként megmondja, mennyire volt biztos a dekóder
+         (avg_logprob), gyanús-e az ismétlési hurok (compression_ratio), és
+         mennyire hitte csendnek a szakaszt (no_speech_prob). Eddig ezt
+         eldobtuk — pedig pont ez mutatja meg, HOL hagyott ki. A gyanús
+         szakaszokat a futam végi automatikus pótló kör újrakérdezi. */
+      for(const g of (d.segments||[])){
+        const cr=+g.compression_ratio||0,
+              lp=(g.avg_logprob==null?0:+g.avg_logprob),
+              ns=+g.no_speech_prob||0,
+              ga=piece.t0+(+g.start||0), gb=piece.t0+(+g.end||0);
+        if(gb-ga<0.8) continue;
+        if(cr>2.4||lp<-1.1||(ns>0.5&&lp<-0.6))
+          qcAll.push([Math.max(0,ga-0.8),Math.min(rec.dur||gb+0.8,gb+0.8)]);
+      }
+      /* a szelet végén félbehagyott mondat a következő körben, átfedésből jön.
+         v83: ha a szelet vége csendhatárra lett igazítva, ott mondat nem törhet
+         ketté — az írásjel hiánya ilyenkor a felismerő pongyolasága, nem
+         csonkaság, és az eldobás VESZTESÉG volna (a régi 1,5 mp-es átfedés
+         csak az utolsó másfél másodpercet hozta volna vissza). */
+      if(!(piece.pcm&&piece.quiet)&&
+         t1<to-1&&sen.length>1&&!/[.!?"'”’)\]]$/.test(sen[sen.length-1].en)) sen.pop();
       const added=mergeSen(rec,sen);
       rec.done=mergeDone(rec.done,piece.t0,Math.min(t1,piece.t1));
       rec.words=CFG.words?1:(rec.words||0);
@@ -4394,7 +4560,16 @@ async function runJob(rec,M,from,to,opts){
   if(!opts.quiet&&!opts.oneShot&&!JOB.stop&&from<=1&&to>=(rec.dur||to)-1){
     const left=nextGap(rec.done,from,to);
     if(!left){
-      const gs=senMissing(rec,GAP_MIN);
+      let gs=senMissing(rec,GAP_MIN);
+      if(qcAll.length){
+        const all=gs.concat(qcAll).sort((x,y)=>x[0]-y[0]); const m=[];
+        for(const r of all){ const l=m[m.length-1];
+          if(l&&r[0]<=l[1]+0.6) l[1]=Math.max(l[1],r[1]); else m.push([r[0],r[1]]) }
+        if(m.length>40) log('pótlás: túl sok gyanús folt ('+m.length+') — az első 40 fut');
+        gs=m.slice(0,40);
+        log('pótlás: +'+qcAll.length+' bizonytalan szegmens a felismerő '+
+            'minőség-jelei (avg_logprob / compression_ratio / no_speech) alapján');
+      }
       if(gs.length){
         log('felismerés kész — a kimaradt mondatok pótlása magától indul ('+
             gs.length+' folt, '+fmtT(gapSec(gs))+')');
@@ -7941,6 +8116,9 @@ function drawSet(){
   $('asrNote').textContent=asrCur().note;
   $('chunkMin').value=CFG.chunkMin;
   $('vChunk').textContent=CFG.chunkMin+' perc';
+  segFill($('segPcm'),[[1,'javított (WAV)'],[0,'nyers szelet']],CFG.pcm===0?0:1,k=>{
+    CFG.pcm=+k; pcmFail=0; saveCfg(); drawSet();
+    toast(+k?'javított hang-előkészítés — kevesebb kihagyás':'nyers szeletküldés',3000) });
   segFill($('segWords'),[[1,'szó szerinti követés'],[0,'csak mondat']],CFG.words?1:0,k=>{
     CFG.words=k; saveCfg(); drawSet() });
   segFill($('segTr'),[['free','ingyenes'],['claude','Claude'],['oai','egyéb API']],CFG.tr,k=>{
