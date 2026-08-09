@@ -441,6 +441,131 @@ public class MappaPlugin extends Plugin {
         }
     }
 
+    /* ---------- DARABOLT ÍRÁS: nagy mentés memória-összeomlás nélkül ----------
+       A teljes könyvtár egyetlen szövegként több tízmegabájt: ha a WebView azt
+       egyben állítja össze és egyben adja át, elfogy a memória, és az app
+       kidob. Ezért a mentés felvételenként érkezik: az első hívás létrehozza a
+       fájlt, a többi hozzáfűzi. A megnyitott kimenetet a hívások közt tartjuk. */
+    private OutputStream fuzOs;
+    private String fuzUri;
+    private long fuzBytes;
+
+    @PluginMethod
+    public void appendText(PluginCall call) {
+        final String nev = call.getString("name", "mentes.jsonl");
+        final String tartalom = call.getString("text", "");
+        final boolean elso = call.getBoolean("first", false);
+        final boolean utolso = call.getBoolean("last", false);
+        try {
+            if (elso) {
+                zarFuz();
+                final String treeS = getContext().getSharedPreferences(PREF, 0)
+                        .getString(KEY_TREE, null);
+                if (treeS == null) { call.reject("nincs kijelolt mappa"); return; }
+                Uri tree = Uri.parse(treeS);
+                Uri dir = DocumentsContract.buildDocumentUriUsingTree(
+                        tree, DocumentsContract.getTreeDocumentId(tree));
+                Uri cel = DocumentsContract.createDocument(
+                        getContext().getContentResolver(), dir, "application/json", nev);
+                if (cel == null) { call.reject("nem sikerult letrehozni a fajlt"); return; }
+                fuzUri = cel.toString();
+                fuzOs = getContext().getContentResolver().openOutputStream(cel);
+                fuzBytes = 0;
+            }
+            if (fuzOs == null) { call.reject("nincs megnyitott mentes-fajl"); return; }
+            byte[] b = tartalom.getBytes("UTF-8");
+            fuzOs.write(b);
+            fuzBytes += b.length;
+            JSObject r = new JSObject();
+            r.put("uri", fuzUri);
+            r.put("bytes", fuzBytes);
+            if (utolso) {
+                fuzOs.flush();
+                zarFuz();
+                r.put("done", true);
+            }
+            call.resolve(r);
+        } catch (Exception e) {
+            zarFuz();
+            call.reject("iras hiba: " + e.getMessage());
+        }
+    }
+
+    private void zarFuz() {
+        try { if (fuzOs != null) { fuzOs.flush(); fuzOs.close(); } } catch (Exception ignored) { }
+        fuzOs = null;
+    }
+
+    /* ---------- a mappában lévő mentés-fájlok (hogy ne kelljen keresni) ---------- */
+    @PluginMethod
+    public void listBackups(PluginCall call) {
+        String s = getContext().getSharedPreferences(PREF, 0).getString(KEY_TREE, null);
+        if (s == null) { call.reject("nincs kijelolt mappa"); return; }
+        JSArray out = new JSArray();
+        Cursor c = null;
+        try {
+            Uri tree = Uri.parse(s);
+            Uri kids = DocumentsContract.buildChildDocumentsUriUsingTree(
+                    tree, DocumentsContract.getTreeDocumentId(tree));
+            c = getContext().getContentResolver().query(kids, new String[]{
+                    DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                    DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                    DocumentsContract.Document.COLUMN_SIZE,
+                    DocumentsContract.Document.COLUMN_LAST_MODIFIED
+            }, null, null, null);
+            while (c != null && c.moveToNext()) {
+                String nev = c.getString(1);
+                if (nev == null) continue;
+                String n = nev.toLowerCase();
+                if (!(n.endsWith(".json") || n.endsWith(".jsonl"))) continue;
+                if (!n.contains("mentes") && !n.contains("hallgato")) continue;
+                JSObject f = new JSObject();
+                f.put("uri", DocumentsContract.buildDocumentUriUsingTree(tree, c.getString(0)).toString());
+                f.put("name", nev);
+                f.put("size", c.getLong(2));
+                f.put("mtime", c.getLong(3));
+                out.put(f);
+            }
+        } catch (Exception e) {
+            call.reject("a mappa nem olvashato: " + e.getMessage());
+            return;
+        } finally {
+            if (c != null) try { c.close(); } catch (Exception ignored) { }
+        }
+        JSObject r = new JSObject();
+        r.put("files", out);
+        call.resolve(r);
+    }
+
+    /* ---------- adott URI beolvasása (mentés visszaállítása) ---------- */
+    @PluginMethod
+    public void readText(PluginCall call) {
+        String uri = call.getString("uri");
+        if (uri == null) { call.reject("nincs uri"); return; }
+        InputStream in = null;
+        try {
+            in = getContext().getContentResolver().openInputStream(Uri.parse(uri));
+            if (in == null) { call.reject("a fajl nem nyithato meg"); return; }
+            java.io.ByteArrayOutputStream bo = new java.io.ByteArrayOutputStream();
+            byte[] buf = new byte[131072];
+            int n;
+            long ossz = 0;
+            while ((n = in.read(buf)) > 0) {
+                bo.write(buf, 0, n);
+                ossz += n;
+                if (ossz > 128L * 1024 * 1024) break;
+            }
+            JSObject r = new JSObject();
+            r.put("text", bo.toString("UTF-8"));
+            r.put("bytes", ossz);
+            call.resolve(r);
+        } catch (Exception e) {
+            call.reject("olvasasi hiba: " + e.getMessage());
+        } finally {
+            try { if (in != null) in.close(); } catch (Exception ignored) { }
+        }
+    }
+
     /* ---------- FÁJL VÁLASZTÁSA ÉS BEOLVASÁSA (visszaállítás) ---------- */
     @PluginMethod
     public void pickText(PluginCall call) {
