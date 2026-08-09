@@ -37,8 +37,23 @@ class MappaSzerver implements Runnable {
         this.jegy = jegy;
     }
 
+    /* v80: KÜLÖN SZÁL MINDEN KÉRÉSHEZ.
+       A korábbi kiszolgáló egyetlen szálon, egymás után kezelte a kéréseket.
+       A lejátszó viszont HOSSZAN ÉLŐ kapcsolatot tart nyitva (streamel), így
+       amíg szól a hang, a felismerés szelet-kérései vártak, majd
+       időtúllépéssel elhasaltak — a naplóban „felismerő hiba: Failed to fetch"
+       néven, miközben a Groq-nak semmi köze nem volt hozzá. Mostantól minden
+       kapcsolat külön szálon fut, tehát a lejátszás és a szeletelés
+       párhuzamosan mehet. */
+    private final java.util.concurrent.ExecutorService pool =
+            java.util.concurrent.Executors.newCachedThreadPool(r -> {
+                Thread t = new Thread(r, "mappa-kapcsolat");
+                t.setDaemon(true);
+                return t;
+            });
+
     int indit() throws Exception {
-        sock = new ServerSocket(0, 4, java.net.InetAddress.getByName("127.0.0.1"));
+        sock = new ServerSocket(0, 32, java.net.InetAddress.getByName("127.0.0.1"));
         port = sock.getLocalPort();
         Thread t = new Thread(this, "mappa-szerver");
         t.setDaemon(true);
@@ -49,6 +64,7 @@ class MappaSzerver implements Runnable {
     void leallit() {
         fut = false;
         try { if (sock != null) sock.close(); } catch (Exception ignored) { }
+        try { pool.shutdownNow(); } catch (Exception ignored) { }
     }
 
     int getPort() { return port; }
@@ -56,20 +72,25 @@ class MappaSzerver implements Runnable {
     @Override
     public void run() {
         while (fut) {
-            Socket s = null;
             try {
-                s = sock.accept();
-                kezel(s);
+                final Socket s = sock.accept();
+                /* v80: a kérést KÜLÖN SZÁL szolgálja ki — a fő szál azonnal
+                   visszatér a következő kapcsolatra várni */
+                pool.execute(() -> {
+                    try { kezel(s); }
+                    catch (Exception e) { /* a lejátszó gyakran félbehagyja: normális */ }
+                    finally { try { s.close(); } catch (Exception ignored) { } }
+                });
             } catch (Exception e) {
                 /* a bezárt socket kivétele normális leállásnál */
-            } finally {
-                try { if (s != null) s.close(); } catch (Exception ignored) { }
             }
         }
     }
 
     private void kezel(Socket s) throws Exception {
-        s.setSoTimeout(15000);
+        /* a lejátszó szüneteltetésnél is nyitva tarthatja a kapcsolatot,
+           ezért bőkezűbb határidő; a szeletelő kérései gyorsak */
+        s.setSoTimeout(60000);
         InputStream in = s.getInputStream();
         OutputStream out = s.getOutputStream();
 
