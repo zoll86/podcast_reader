@@ -1033,7 +1033,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v77';
+const APP_VER='v78';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -2787,8 +2787,44 @@ function stitchGroups(rec){
 
    `force` nélkül csak a fordítás nélküli (friss) töredékekhez nyúlunk — kész
    magyar szöveg nem vész el kérdés nélkül. */
+/* v78: REJTETT MONDATHATÁR. Ahol a felismerő átugrott egy szakaszt, a maradékot
+   írásjel nélkül összefűzi: „…negative 17 degrees Hello everyone, as the…".
+   A szó-időbélyeg megmutatja a vágás helyét: ha két szó közt legalább 1,2 s
+   telik el, ÉS a következő szó nagybetűs mondatkezdő, az mondathatár — akkor
+   is, ha nincs írásjel. Így a buborék = mondat elv a kihagyás után is áll, és
+   a hiány láthatóvá válik. */
+const NAGY_KEZDET=/^(Hello|Well|And|But|So|Then|Now|Yes|No|Okay|OK|What|When|Where|Why|How|This|That|These|Those|There|It|We|You|I|They|He|She|Let|Please|Thanks|Thank|Good|Right|Alright|Actually|Anyway|Meanwhile|Later|Today|Tomorrow|Yesterday)$/;
+function rejtettVagas(sn){
+  const w=Array.isArray(sn.w)?sn.w.filter(x=>typeof x==='number'):null;
+  const tk=String(sn.en||'').trim().split(/\s+/).filter(Boolean);
+  if(!w||w.length!==tk.length||tk.length<6) return null;
+  for(let i=1;i<tk.length;i++){
+    const res=w[i]-w[i-1];
+    if(res<1.2) continue;
+    const sz=tk[i].replace(/^[^\p{L}]+/u,'');
+    if(!/^[A-Z]/.test(sz)) continue;
+    if(/[.!?…]["»”')]?$/.test(tk[i-1])) continue;      /* már van írásjel */
+    if(!NAGY_KEZDET.test(sz.replace(/[^\p{L}]/gu,''))) continue;
+    return i;                                          /* itt vágunk */
+  }
+  return null;
+}
 function splitFrag(s){
   const en=String(s.en||'').trim();
+  /* v78: ha a szövegben nincs írásjeles határ, de a szó-idők + nagybetű
+     mondathatárt mutatnak, ott vágunk (a kihagyás nyoma) */
+  if(splitSentences(en).length<=1){
+    const k=rejtettVagas(s);
+    if(k){
+      const tk=en.split(/\s+/).filter(Boolean), w=s.w;
+      const a1=tk.slice(0,k).join(' '), a2=tk.slice(k).join(' ');
+      const o1={a:+(+s.a).toFixed(2),b:+(+w[k]).toFixed(2),en:a1+
+        (/[.!?…,;:]$/.test(a1)?'':'.'),w:w.slice(0,k)};
+      const o2={a:+(+w[k]).toFixed(2),b:+(+s.b).toFixed(2),en:a2,w:w.slice(k)};
+      log('rejtett mondathatár:',a1.slice(-30),'||',a2.slice(0,30));
+      return [o1,o2];
+    }
+  }
   const parts=splitSentences(en);
   if(parts.length<=1) return null;
   const toks=en.split(/\s+/).filter(Boolean);
@@ -2957,6 +2993,68 @@ function senGaps(rec,minGap){
   const dur=rec.dur||prev;
   if(dur-prev>=g&&cov(prev,dur)) out.push([prev,dur]);
   return out;
+}
+/* ======== v78: A BUBORÉKON BELÜLI KIHAGYÁS FELDERÍTÉSE ========
+   A mérés (The White Vault 1. rész) megmutatta a valódi hibát: a Groq néha
+   ÁTUGROTT egy szakaszt, de a maradékot EGYETLEN szegmensbe fűzte — így az
+   időtartomány folytonosnak látszott, és a hézag-kereső semmit nem talált,
+   noha 10 másodpercnyi beszéd elveszett. A konkrét eset:
+
+     8:09–8:35 (26 s, EGY buborék): „…in negative 17 degrees Hello everyone,
+     as the representative of Sitcha Group…"
+
+   Két jel mutatja a hiányt, és mindkettőt használjuk:
+
+   1. SZÓ-IDŐBÉLYEG (pontos): a Whisper minden szóhoz időt ad. Ha egy buborékon
+      BELÜL két szomszédos szó között több mint ~2,5 s telik el, ott kihagyott
+      beszéd van — ez maga a bizonyíték, nem becslés.
+   2. BESZÉDSŰRŰSÉG (tartalék, ha nincs szó-idő): a normál tempó 2,3–3,2
+      szó/másodperc. Az említett buborék 1,9-en állt; 1,9 alatt gyanús.
+
+   Zenés/csendes szakaszra is ráfuthat (ott nincs mit felismerni) — ezért a
+   pótlás úgyis csak azt írja be, amit tényleg talál, és a meglévőt nem bántja. */
+const HOLE_RES=2.5;      /* szó-időbélyegek közti rés, ami már kihagyás */
+const HOLE_DENS=1.9;     /* szó/másodperc, ami alatt gyanús a buborék */
+function senHoles(rec){
+  const S=(rec.sen||[]);
+  const out=[];
+  for(const sn of S){
+    const w=Array.isArray(sn.w)?sn.w.filter(x=>typeof x==='number'):null;
+    if(w&&w.length>1){
+      for(let i=0;i<w.length-1;i++){
+        const res=w[i+1]-w[i];
+        if(res>=HOLE_RES)
+          out.push([Math.max(0,w[i]-0.5),Math.min(rec.dur||1e9,w[i+1]+0.5)]);
+      }
+      /* a mondat vége utáni rés a buborék záró idejéig */
+      const veg=w[w.length-1];
+      if((sn.b-veg)>=HOLE_RES) out.push([Math.max(0,veg-0.5),sn.b]);
+      continue;
+    }
+    /* szó-idő nélkül: sűrűség */
+    const h=(sn.b||0)-(sn.a||0);
+    const sz=String(sn.en||'').trim().split(/\s+/).filter(Boolean).length;
+    if(h>=6&&sz>0&&(sz/h)<HOLE_DENS) out.push([sn.a,sn.b]);
+  }
+  /* átfedő szakaszok összevonása */
+  out.sort((a,b)=>a[0]-b[0]);
+  const m=[];
+  for(const r of out){
+    const l=m[m.length-1];
+    if(l&&r[0]<=l[1]+0.5) l[1]=Math.max(l[1],r[1]); else m.push([r[0],r[1]]);
+  }
+  return m.filter(r=>r[1]-r[0]>=1.5);
+}
+/* a mondatok KÖZTI és a buborékon BELÜLI hiány együtt */
+function senMissing(rec,minGap){
+  const a=senGaps(rec,minGap), b=senHoles(rec);
+  const all=a.concat(b).sort((x,y)=>x[0]-y[0]);
+  const m=[];
+  for(const r of all){
+    const l=m[m.length-1];
+    if(l&&r[0]<=l[1]+0.5) l[1]=Math.max(l[1],r[1]); else m.push([r[0],r[1]]);
+  }
+  return m;
 }
 const gapSec=gs=>gs.reduce((n,g)=>n+(g[1]-g[0]),0);
 
@@ -3673,7 +3771,7 @@ function passOpts(){
   return o;
 }
 const runGaps=(rec,M,minGap)=>{
-  const gs=senGaps(rec,minGap);
+  const gs=senMissing(rec,minGap);      /* v78: a buborékon belüli hiány is */
   if(!gs.length){ toast('nincs elég nagy néma folt — próbáld a második átfutást',5000); return }
   const o=passOpts();
   if(o.model) log('pótlás a pontos modellel:',o.model);
@@ -6866,7 +6964,7 @@ async function sheetProcess(){
       fn:()=>goPass(t,dur)}:null,
     (function(){
       /* ha van elég nagy néma folt, ott olcsóbb csak azt megkérdezni */
-      const gs=senGaps(REC,GAP_MIN);
+      const gs=senMissing(REC,GAP_MIN);   /* v78: belső kihagyás is */
       if(!gs.length) return null;
       return {t:'kimaradt mondatok pótlása'+
         (asrModel()==='whisper-large-v3-turbo'?' (pontos modellel)':'')+
