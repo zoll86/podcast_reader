@@ -1033,7 +1033,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v80';
+const APP_VER='v81';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -1284,29 +1284,99 @@ async function srvReady(){
 const safUrl=(uri)=>SRV?(SRV.base+'?t='+encodeURIComponent(SRV.token)+
   '&uri='+encodeURIComponent(uri)):null;
 
-/* File-szerű objektum a mappában lévő fájlhoz. A `slice()` VALÓDI Blobot ad
-   (Range-kéréssel), tehát mindenhol behelyettesíthető egy File helyére. */
+/* ======== v81: A SZELETELÉS NEM A LOCALHOST HTTP-N OLVAS ========
+   A v80-ban a mappa-fájl `slice()`-e egy `fetch('http://127.0.0.1:PORT/…')`
+   Range-kérés volt. Három sebezhetőség egyszerre: a WebView https originből
+   kért sima HTTP-t (mixed content), ugyanazt a kiszolgálót közben a lejátszó
+   is fogta, és minden szelet egy socketen múlt. A natív plugin
+   `read({uri,offset,length})` metódusa base64-ben, közvetlenül a bridge-en
+   adja ugyanazt a tartományt: nincs socket, nincs mixed content, nincs
+   verseny a lejátszóval. A LEJÁTSZÓ marad a localhost streamen — annak kell
+   a Range, és egy nyolcórás fájlt csak így lehet stream-elni.
+   Ha a plugin régi (nincs `read`), az első próbálkozás után automatikusan
+   visszaáll a HTTP-re, tehát régi APK-val is működik. */
+let SAF_READ=null;                 /* null = még nem tudjuk, true = bridge, false = HTTP */
+const SAF_CHUNK=2*1024*1024;       /* egy bridge-hívás legnagyobb tartománya */
+function b64bytes(x){
+  let t=String(x||'');
+  if(/^data:/i.test(t)){ const i=t.indexOf(','); if(i>=0) t=t.slice(i+1) }
+  t=t.replace(/\s+/g,'');
+  const bin=atob(t), n=bin.length, out=new Uint8Array(n);
+  for(let i=0;i<n;i++) out[i]=bin.charCodeAt(i);
+  return out;
+}
+async function safReadOne(uri,off,len){
+  const r=await MAPPA.read({uri:uri,offset:off,length:len});
+  const b=r&&(r.data!=null?r.data:(r.b64!=null?r.b64:(r.base64!=null?r.base64:r.bytes)));
+  if(b==null) throw new Error('a plugin read() nem adott adatot');
+  const u=b64bytes(b);
+  if(!u.length&&len>0) throw new Error('a plugin read() üresen tért vissza');
+  return u;
+}
+async function safBridge(uri,off,len){
+  if(len<=SAF_CHUNK) return await safReadOne(uri,off,len);
+  const parts=[]; let got=0;
+  for(let p=0;p<len;p+=SAF_CHUNK){
+    const u=await safReadOne(uri,off+p,Math.min(SAF_CHUNK,len-p));
+    parts.push(u); got+=u.length;
+    if(u.length<Math.min(SAF_CHUNK,len-p)) break;    /* fájlvég */
+  }
+  const out=new Uint8Array(got); let o=0;
+  for(const u of parts){ out.set(u,o); o+=u.length }
+  return out;
+}
+async function safHttp(url,s,e){
+  let last=null;
+  for(let att=0;att<3;att++){
+    try{
+      const r=await fetch(url,{headers:{Range:'bytes='+s+'-'+(e-1)}});
+      if(!r.ok&&r.status!==206&&r.status!==200)
+        throw new Error('a mappából nem olvasható ('+r.status+')');
+      return new Uint8Array(await r.arrayBuffer());
+    }catch(err){ last=err; await sleep(200+att*500) }
+  }
+  throw last||new Error('a mappából nem olvasható');
+}
+async function safRange(src,s,e){
+  const len=Math.max(0,e-s);
+  if(!len) return new Uint8Array(0);
+  if(SAF_READ!==false&&MAPPA&&MAPPA.read&&src.saf){
+    try{
+      const u=await safBridge(src.saf,s,len);
+      if(SAF_READ===null){ SAF_READ=true; log('mappa-olvasás: natív bridge (read)') }
+      return u;
+    }catch(err){
+      const m=String(err&&(err.message||err)).slice(0,90);
+      if(SAF_READ===null){ SAF_READ=false;
+        log('mappa-olvasás: a bridge read() nem használható ('+m+') — HTTP-vel megy tovább') }
+      else log('mappa-olvasás bridge-en elhasalt ('+m+') — most HTTP-vel');
+    }
+  }
+  const url=src.url||safUrl(src.saf);
+  if(!url) throw new Error('a mappa-kiszolgáló nem fut');
+  return await safHttp(url,s,e);
+}
+
+/* File-szerű objektum a mappában lévő fájlhoz. A `slice()` VALÓDI Blobot ad,
+   tehát mindenhol behelyettesíthető egy File helyére. */
 function safFile(f){
   const url=safUrl(f.uri);
   const o={
     name:f.name, size:+f.size||0, type:f.mime||'', saf:f.uri, url:url,
     folder:f.folder||'', lastModified:+f.mtime||Date.now(),
     slice(a,b){
-      const s=Math.max(0,a|0), e=(b==null?o.size:Math.min(o.size,b|0));
+      /* |0 helyett Math.floor: 2 GB fölötti hangoskönyvnél a |0 negatívba fordul */
+      const s=Math.max(0,Math.floor(+a||0));
+      const e=(b==null?o.size:Math.min(o.size,Math.max(0,Math.floor(+b||0))));
+      const src={saf:o.saf,url:o.url||safUrl(o.saf),name:o.name};
       return {
         size:Math.max(0,e-s), type:o.type,
         async arrayBuffer(){
-          const r=await fetch(url,{headers:{Range:'bytes='+s+'-'+(e-1)}});
-          if(!r.ok&&r.status!==206&&r.status!==200)
-            throw new Error('a mappából nem olvasható ('+r.status+')');
-          return await r.arrayBuffer();
+          const u=await safRange(src,s,e);
+          return (u.byteOffset===0&&u.length===u.buffer.byteLength)
+                 ?u.buffer:u.slice().buffer;
         },
-        async blob(){
-          const r=await fetch(url,{headers:{Range:'bytes='+s+'-'+(e-1)}});
-          if(!r.ok&&r.status!==206&&r.status!==200)
-            throw new Error('a mappából nem olvasható ('+r.status+')');
-          return await r.blob();
-        }
+        async blob(){ return new Blob([await safRange(src,s,e)],{type:o.type}) }
       };
     }
   };
@@ -1841,6 +1911,38 @@ const asrHour=()=>{ const m=ASRMODEL[asrModel()]; return m?m.usdHour:(asrCur().u
 /* A `temp` a hézagkeresés miatt paraméter: a nulla hőmérséklet determinisztikus,
    tehát ugyanarra a hangra ugyanazt a HALLGATÁST adja — amit egyszer elhagyott, azt
    másodszor is elhagyná. Egy kicsit megemelve más dekódolási úton indul el. */
+/* ======== v81: KÉRÉS XHR-TARTALÉKKAL ========
+   A napló szerint ugyanaz a szelet háromszor egymás után „Failed to fetch”-elt,
+   közben más szeletek átmentek — ez nem a Groq és nem a modell, hanem a WebView
+   `fetch`-e nagy multipart törzsnél. Ugyanaz a kérés XHR-rel általában átmegy,
+   ezért hálózati hiba (nincs HTTP-státusz) esetén egyszer XHR-rel is
+   megpróbáljuk. A napló megmutatja, melyik úton ment át — nem elrejtjük a hibát. */
+function postXhr(url,headers,body,ms){
+  return new Promise((res,rej)=>{
+    const x=new XMLHttpRequest();
+    x.open('POST',url,true);
+    for(const k in headers) x.setRequestHeader(k,headers[k]);
+    x.timeout=ms||240000;
+    x.onload=()=>res({ok:x.status>=200&&x.status<300,status:x.status,
+      body:x.responseText||'', hdr:k=>x.getResponseHeader(k)});
+    x.onerror=()=>rej(new Error('a kérés nem ment át (XHR)'));
+    x.ontimeout=()=>rej(new Error('a kérés túllépte az időkorlátot (XHR)'));
+    x.send(body);
+  });
+}
+async function postForm(url,headers,fd,ms){
+  try{
+    const r=await fetch(url,{method:'POST',headers:headers,body:fd});
+    return {ok:r.ok,status:r.status,body:await r.text(),
+            hdr:k=>r.headers.get(k),via:'fetch'};
+  }catch(err){
+    log('kérés fetch-en elhasalt ('+String(err&&(err.message||err)).slice(0,60)+
+        ') — XHR-rel újra');
+    const r=await postXhr(url,headers,fd,ms);
+    r.via='XHR'; if(r.ok) log('kérés XHR-en átment');
+    return r;
+  }
+}
 async function asrCall(blob,fileName,secs,hintPrev,temp,opts){
   if(!CFG.asrKey) throw new Error('nincs megadva a felismerő kulcsa (⚙ Beállítások)');
   const url=asrUrl(); if(!url) throw new Error('nincs megadva a felismerő végpontja');
@@ -1859,15 +1961,18 @@ async function asrCall(blob,fileName,secs,hintPrev,temp,opts){
      ezért az eddigi „második átfutás" gyakran semmit nem talált. A prompt
      elhagyása és a más modell viszont valóban más eredményt ad. */
   if(hintPrev&&!opts.noPrompt) fd.append('prompt',hintPrev.slice(-200));
-  const r=await fetch(url+'/audio/transcriptions',{method:'POST',
-    headers:{'Authorization':'Bearer '+CFG.asrKey}, body:fd});
+  const r=await postForm(url+'/audio/transcriptions',
+    {'Authorization':'Bearer '+CFG.asrKey}, fd, 240000);
   if(!r.ok){
-    const t=await r.text().catch(()=>'');
+    const t=String(r.body||'');
     const e=new Error('felismerés '+r.status+': '+t.slice(0,200).replace(/\s+/g,' '));
-    e.status=r.status; e.retry=+(r.headers.get('retry-after')||0);
+    e.status=r.status; e.retry=+(r.hdr('retry-after')||0);
     throw e;
   }
-  const d=await r.json();
+  let d;
+  try{ d=JSON.parse(r.body) }
+  catch(err){ throw new Error('a felismerő válasza nem értelmezhető ('+
+    String(r.body||'').slice(0,80)+')') }
   spend.asrSec+=secs||0;
   /* v76: ha a pótló futam drágább modellt használt, azt külön is beszámítjuk */
   if(opts.model&&ASRMODEL[opts.model]&&ASRMODEL[opts.model].usdHour>asrHour())
@@ -3123,29 +3228,41 @@ async function runPass(rec,M,ranges,cim,minLen,opts){
   if(!ranges.length){ toast('nincs mit újra átfutni'); return }
   JOB.on=true; JOB.stop=false; JOB.id=rec.id;
   progShow(true); $('progHide').classList.add('hid'); $('progStop').textContent='szüneteltetés';
-  const step=passStep(), total=passCalls(ranges);
-  let found=0, call=0; const ujak=[];
+  const step=passStep();
+  let found=0, call=0, halved=0; const ujak=[];
+  /* v81: MUNKALISTA a két egymásba tett ciklus helyett. Így a HÁROMSZOR sem
+     átment szeletet felezve vissza tudjuk tenni a lista elejére — a v80-ban
+     az ilyen szelet egyszerűen kimaradt (ez vitte el a 8:15-ös szakaszt). */
+  const q=[];
+  for(const r of ranges){
+    /* egy-egy másodperc ráhagyás, hogy a mondat eleje-vége ne csorbuljon */
+    const t0=Math.max(0,r[0]-1), t1=Math.min(rec.dur||r[1],r[1]+1);
+    for(let a=t0;a<t1;a+=step) q.push([a,Math.min(t1,a+step)]);
+  }
   try{
-    for(const r of ranges){
-      if(JOB.stop) break;
-      /* egy-egy másodperc ráhagyás, hogy a mondat eleje-vége ne csorbuljon */
-      const t0=Math.max(0,r[0]-1), t1=Math.min(rec.dur||r[1],r[1]+1);
-      for(let a=t0;a<t1&&!JOB.stop;a+=step){
-        const b=Math.min(t1,a+step);
+    {
+      while(q.length&&!JOB.stop){
+        const a=q[0][0], b=q[0][1]; q.shift();
         call++;
+        const total=call+q.length;
         progSet(Math.round((call-1)/total*100),cim,
           fmtT(a)+' → '+fmtT(b)+' · '+found+' új mondat · '+call+'/'+total+' kérés');
         let piece;
         try{ piece=await cut(M,a,b) }
         catch(e){ log('átfutás-szeletelés:',e); continue }
+        log('átfutás-szelet '+fmtT(piece.t0)+'–'+fmtT(piece.t1)+' · '+fmtMB(piece.blob.size));
         if(piece.blob.size>24*1024*1024){
-          log('átfutás: a szelet túl nagy — kisebb szeletméret kell'); continue }
-        let d=null;
+          if(b-a>20){ const m=(a+b)/2; q.unshift([m,b]); q.unshift([a,m]);
+            log('átfutás: a szelet túl nagy ('+fmtMB(piece.blob.size)+') — felezve újra') }
+          else log('átfutás: a szelet túl nagy — kisebb szeletméret kell');
+          continue }
+        let d=null, lastErr=null;
         for(let att=0;att<3&&!JOB.stop;att++){
           try{ d=await asrCall(piece.blob,piece.name,piece.t1-piece.t0,
                  (opts&&opts.noPrompt)?'':gapHint(rec,a),
                  (opts&&opts.temp!=null)?opts.temp:0.2, opts||{}); break }
           catch(e){
+            lastErr=e;
             log('átfutás-felismerés',e.status||'',String(e.message).slice(0,150));
             if(e.status===401||e.status===403) throw e;
             const wait=e.retry?Math.min(60,e.retry):(att+1)*6;
@@ -3154,7 +3271,21 @@ async function runPass(rec,M,ranges,cim,minLen,opts){
             for(let x=0;x<wait&&!JOB.stop;x++) await sleep(1000);
           }
         }
-        if(!d) continue;
+        if(!d){
+          /* v81: háromszor sem ment át — FELEZVE visszatesszük. Csak HÁLÓZATI
+             hibánál (nincs HTTP-státusz): a 429-et a retry-after várakozás
+             kezeli, ott a felezés csak több kérés. A >20 s korlát és a
+             legfeljebb 12 felezés miatt ez véges. */
+          const halozati=!lastErr||!lastErr.status;
+          if(b-a>20&&halozati&&halved<12&&!JOB.stop){
+            halved++;
+            const m=(a+b)/2; q.unshift([m,b]); q.unshift([a,m]);
+            log('átfutás: a '+fmtT(a)+'–'+fmtT(b)+' szelet nem ment át — felezve újra');
+          }else if(!JOB.stop){
+            log('átfutás: a '+fmtT(a)+'–'+fmtT(b)+' szelet KIMARADT');
+          }
+          continue;
+        }
         /* v52: írásjelezés a nyers válaszon, még a tagolás előtt */
         if(llmOk()){
           const np=await punctAsr(d);
