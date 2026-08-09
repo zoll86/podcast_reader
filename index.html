@@ -804,6 +804,35 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
         vágás csendhatáron, a halk beszéd felerősítése (AGC), 16 kHz-es WAV megy ki.
         A halk vagy zene alatti mondatok kihagyása ellen ez a leghatásosabb. Ha egy
         régi készüléken akadozna, itt visszaváltható a nyers szeletküldés.</div>
+      <label class="lbl">beszédtérkép (Silero VAD)</label>
+      <div class="seg" id="segVad">
+        <button data-k="1">be</button>
+        <button data-k="0">ki</button>
+      </div>
+      <div class="note">Neurális beszédjelenlét-felismerő a készüléken (egyszeri
+        ~2 MB letöltés, utána gyorsítótárból megy). A szelethatárt valódi
+        beszédszünetre teszi, és megtalálja azokat a szakaszokat, ahol van beszéd,
+        de a leiratból hiányzik — ezek célzott pótlást kapnak. Ha az első
+        betöltéshez nincs hálózat, magától kimarad.</div>
+      <label class="lbl">szeletelés</label>
+      <div class="seg" id="segSlice">
+        <button data-k="norm">normál</button>
+        <button data-k="prec">precíz (≤28 mp)</button>
+      </div>
+      <div class="note">A precíz mód a szeletet beszédhatáros, legfeljebb 28
+        másodperces ablakokra bontja — a hosszú-hang mérések szerint a 30 mp-es
+        dekódolási ablakon belül a legkevesebb a kihagyás. Ára: kb. 8-10× több
+        kérés (az ütemező kordában tartja). Makacs, zenés felvételekhez ajánlott;
+        a beszédtérkép bekapcsolt állapotát igényli.</div>
+      <label class="lbl">előzmény-prompt</label>
+      <div class="seg" id="segHint">
+        <button data-k="1">be</button>
+        <button data-k="0">ki</button>
+      </div>
+      <div class="note">Az előző szelet utolsó mondata megy promptként a
+        felismerőnek: a nevek írásmódját és a folytonosságot segíti, de ritkán
+        ismétlési hurkot okozhat. Ha egy fájlnál sok az ismétlődő sor, próbáld
+        kikapcsolva.</div>
       <label class="lbl">szóhatárok</label>
       <div class="seg" id="segWords">
         <button data-k="1">szó szerinti követés</button>
@@ -1042,7 +1071,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v84';
+const APP_VER='v86';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -1098,7 +1127,7 @@ addEventListener('unhandledrejection',e=>{
 
 /* beállítások egyetlen objektumban, hogy egy helyen legyen mentve */
 var CFG=Object.assign({
-  asr:'groq', asrKey:'', asrUrl:'', asrModel:'', chunkMin:5, words:1, pcm:1,
+  asr:'groq', asrKey:'', asrUrl:'', asrModel:'', chunkMin:5, words:1, pcm:1, vad:1, slice:'norm', hint:1,
   tr:'free', clKey:'', clModel:'haiku', oaiUrl:'https://api.moonshot.ai/v1', oaiKey:'', oaiModel:'kimi-k2.6',
   kfs:1.35, font:'lit', huMode:'split', rate:1, keepAudio:1, trMode:'all', follow:0,
   immSec:5, immTip:0, pairs:0, learn:0, weave:1, wDens:1, paged:1, shelf:1,
@@ -2009,12 +2038,35 @@ async function cutSmart(M,a,b,snapEnd){
       if(f.length<PCM_SR*0.4) throw new Error('üres dekód');
       let i1=f.length, quiet=false;
       if(snapEnd&&M.dur&&b<M.dur-1){
-        const q=quietCutIdx(f,Math.max(0,f.length-Math.round(25*PCM_SR)),f.length);
-        if(q){ i1=Math.max(Math.round(PCM_SR*0.5),q.i); quiet=q.quiet }
+        /* v85: előbb a Silero — VALÓDI beszédszünetet keres, nem hangerő-
+           minimumot. Az utolsó 30 mp beszédtérképéből az utolsó ≥0,35 s-os
+           beszédszünet közepén vágunk; ha nincs ilyen (vagy a VAD nem
+           elérhető), marad az energia-alapú tartalék. */
+        let vDone=false;
+        if(await vadEnsure()){
+          try{
+            const w=Math.min(f.length,Math.round(30*PCM_SR)), off=f.length-w;
+            const map=await speechMap(f.subarray(off));
+            const gaps=vadGaps(map,w/PCM_SR);
+            if(gaps.length){
+              const g=gaps[gaps.length-1];
+              i1=Math.max(Math.round(PCM_SR*0.5),
+                          off+Math.round((g[0]+g[1])/2*PCM_SR));
+              quiet=true; vDone=true;
+            }
+          }catch(e){ log('VAD határvágás hiba: '+
+            String(e&&(e.message||e)).slice(0,60)) }
+        }
+        if(!vDone){
+          const q=quietCutIdx(f,Math.max(0,f.length-Math.round(25*PCM_SR)),f.length);
+          if(q){ i1=Math.max(Math.round(PCM_SR*0.5),q.i); quiet=q.quiet }
+        }
       }
       agcF32(f);
+      /* v85: a dekódolt PCM a szeleten marad (f32) — a beszédtérkép-ellenőrzés
+         használja, utána a hívó nullázza, hogy a memória felszabaduljon */
       return {blob:wavF32(f.subarray(0,i1)),name:'r.wav',
-              t0:a,t1:a+i1/PCM_SR,pcm:1,quiet:quiet};
+              t0:a,t1:a+i1/PCM_SR,pcm:1,quiet:quiet,f32:f,fT0:a};
     }catch(e){
       pcmFail++;
       log('hang-előkészítés elhasalt ('+String(e&&(e.message||e.name)||e).slice(0,60)+
@@ -2023,6 +2075,86 @@ async function cutSmart(M,a,b,snapEnd){
     }
   }
   return await cut(M,a,b);
+}
+
+/* ======== v85: SILERO VAD — BESZÉDTÉRKÉP ========
+   A Whisper minőség-jelei csak arról szólnak, amit a modell LEÍRT. Arról,
+   amit szó nélkül átugrott, egyedül a hang tanúskodik. A Silero VAD egy
+   apró (~2 MB) neurális beszédjelenlét-felismerő, amelyre a szakma nagyjai
+   (WhisperX, faster-whisper) is építenek: beszédet ismer fel, nem hangerőt —
+   zenés podcastnál a "legcsendesebb pont" zene közepe is lehet, a Silero ott
+   nem téved. A böngészőben fut (ONNX Runtime WASM), a hang nem hagyja el a
+   készüléket. Élő mérés: ×90-es sebesség asztali gépen, telefonon ~×30 —
+   egy 5 perces szelet térképe pár másodperc.
+   Ha a CDN nem elérhető (első betöltéskor kell hálózat), minden funkció
+   visszaáll az energia-alapú tartalékra — a felismerés nem állhat meg. */
+const VAD_ORT='https://cdn.jsdelivr.net/npm/onnxruntime-web@1.14.0/dist/';
+const VAD_CDN='https://cdn.jsdelivr.net/npm/@ricky0123/vad-web@0.0.24/dist/';
+let vadInst=null, vadState=0;
+function vadScript(u){ return new Promise((res,rej)=>{
+  const s=document.createElement('script');
+  s.src=u; s.onload=res; s.onerror=()=>rej(new Error('nem tölthető: '+u));
+  document.head.appendChild(s) }) }
+async function vadEnsure(){
+  if(CFG.vad===0) return false;
+  if(vadState) return vadState>0;
+  try{
+    if(!window.ort) await vadScript(VAD_ORT+'ort.js');
+    if(!window.vad) await vadScript(VAD_CDN+'bundle.min.js');
+    vadInst=await window.vad.NonRealTimeVAD.new({
+      onnxWASMBasePath:VAD_ORT, baseAssetPath:VAD_CDN,
+      positiveSpeechThreshold:0.5, negativeSpeechThreshold:0.35,
+      minSpeechFrames:2});
+    vadState=1; log('Silero VAD betöltve — beszédtérkép aktív');
+  }catch(e){
+    vadState=-1;
+    log('Silero VAD nem tölthető ('+String(e&&(e.message||e)).slice(0,80)+
+        ') — marad az energia-alapú csendkeresés');
+  }
+  return vadState>0;
+}
+/* beszéd-intervallumok másodpercben a bemenő PCM elejéhez képest. A könyvtár
+   96 ms-os mikro-keretekben adja a találatokat (élő teszt igazolta), ezért a
+   0,3 mp-nél kisebb hézagú szomszédokat egybeolvasztjuk. */
+async function speechMap(f){
+  const raw=[];
+  for await (const s of vadInst.run(f,PCM_SR)) raw.push([s.start/1000,s.end/1000]);
+  raw.sort((a,b)=>a[0]-b[0]); const mg=[];
+  for(const r of raw){ const l=mg[mg.length-1];
+    if(l&&r[0]<=l[1]+0.3) l[1]=Math.max(l[1],r[1]); else mg.push([r[0],r[1]]) }
+  return mg;
+}
+/* nem-beszéd hézagok egy térképből, a [0,len] tartományon belül */
+function vadGaps(map,len){
+  const gaps=[]; let cur=0;
+  for(const m of map){ if(m[0]-cur>=0.35) gaps.push([cur,m[0]]); cur=Math.max(cur,m[1]) }
+  if(len-cur>=0.35) gaps.push([cur,len]);
+  return gaps;
+}
+/* v86: a dekódolt szelet felbontása ≤28 mp-es, beszédhatáros ablakokra
+   (WhisperX-féle cut & merge). A hosszú-hang mérések szerint a 15–28 mp-es,
+   beszédszüneten vágott ablakok adják a legkevesebb kihagyást — a 30 mp-es
+   dekódolási ablakon túl a modell heurisztikákra szorul, és ott ugrik. */
+async function precWindows(piece){
+  const len=Math.max(0,Math.min(piece.t1,piece.fT0+piece.f32.length/PCM_SR)-piece.fT0);
+  if(len<10) return null;
+  const map=await speechMap(piece.f32.subarray(0,Math.round(len*PCM_SR)));
+  if(!map.length) return null;
+  const win=[]; let s0=null,s1=null;
+  const zar=()=>{ if(s0!=null) win.push([Math.max(0,s0-0.2),Math.min(len,s1+0.2)]); s0=null };
+  for(const m of map){
+    if(s0==null){ s0=m[0]; s1=m[1]; continue }
+    if(m[1]-s0<=28) s1=m[1];
+    else { zar(); s0=m[0]; s1=m[1] }
+  }
+  zar();
+  /* a szünet nélküli, 30 mp-nél hosszabb beszédfolyam kemény vágást kap */
+  const out=[];
+  for(const w of win){
+    if(w[1]-w[0]<=30){ out.push(w); continue }
+    for(let x=w[0];x<w[1]-0.5;x+=28) out.push([x,Math.min(w[1],x+28)]);
+  }
+  return out.length>=2?out:null;
 }
 </script>
 <script>
@@ -4473,6 +4605,75 @@ const runGaps=(rec,M,minGap)=>{
   if(o.model) log('pótlás a pontos modellel:',o.model);
   return runHoles(rec,M,gs,'kimaradt mondatok',o);
 };
+/* ======== v86: KONTROLL-FUTAM ========
+   Két különböző modell mást hagy ki. A turbo (3× olcsóbb) végigmegy a teljes
+   felvételen prompt nélkül, kis hőmérséklettel — más dekódolási úton —, és
+   ahol Ő mondatot hall, de a fő leirat nem fedi le, azt a pontos modell
+   célzottan újrakérdezi. Gépi mása annak az összevetésnek, amit eddig kézzel,
+   másik lejátszó leiratával lehetett megcsinálni. */
+function senCover(rec,a,b){
+  let cov=0;
+  for(const s of rec.sen){
+    if(s.b<=a||s.a>=b) continue;
+    cov+=Math.min(b,s.b)-Math.max(a,s.a);
+  }
+  return cov/Math.max(0.001,b-a);
+}
+async function runCross(rec,M){
+  if(JOB.on){ toast('már fut egy feldolgozás'); return }
+  if(!rec.dur){ toast('előbb ismerd fel a felvételt'); return }
+  JOB.on=true; JOB.stop=false; JOB.id=rec.id;
+  progShow(true); $('progHide').classList.add('hid'); $('progStop').textContent='szüneteltetés';
+  const step=Math.max(60,CFG.chunkMin*60);
+  const miss=[];
+  try{
+    for(let t=0;t<rec.dur&&!JOB.stop;t+=step){
+      const a=t, b=Math.min(rec.dur,t+step);
+      progSet(Math.min(99,Math.round(a/rec.dur*100)),'kontroll-futam (turbo)',
+        fmtT(a)+' → '+fmtT(b)+' · eddig '+miss.length+' gyanús hely');
+      let piece;
+      try{ piece=await cutSmart(M,a,b,false) }
+      catch(e){ log('kontroll-szeletelés:',e); continue }
+      if(piece.f32) piece.f32=null;
+      if(piece.blob.size>24*1024*1024){ log('kontroll: túl nagy szelet'); continue }
+      let d=null;
+      for(let att=0;att<3&&!JOB.stop;att++){
+        try{ d=await asrCall(piece.blob,piece.name,piece.t1-piece.t0,'',0.2,
+               {model:'whisper-large-v3-turbo',noPrompt:true}); break }
+        catch(e){
+          log('kontroll-felismerés',e.status||'',String(e.message).slice(0,120));
+          if(e.status===401||e.status===403) throw e;
+          const w=e.retry?Math.min(60,e.retry):(att+1)*6;
+          for(let x=0;x<w&&!JOB.stop;x++) await sleep(1000);
+        }
+      }
+      if(!d){ log('kontroll: a '+fmtT(a)+'–'+fmtT(b)+' szelet nem ment át'); continue }
+      for(const g of (d.segments||[])){
+        const ga=piece.t0+(+g.start||0), gb=piece.t0+(+g.end||0);
+        const words=String(g.text||'').trim().split(/\s+/).filter(Boolean).length;
+        if(gb-ga<1.2||words<3) continue;
+        if(senCover(rec,ga,gb)<0.4)
+          miss.push([Math.max(0,ga-0.5),Math.min(rec.dur,gb+0.5)]);
+      }
+    }
+    if(JOB.stop){ progShow(false); JOB.on=false; return }
+    miss.sort((x,y)=>x[0]-y[0]); const mg=[];
+    for(const r of miss){ const l=mg[mg.length-1];
+      if(l&&r[0]<=l[1]+0.6) l[1]=Math.max(l[1],r[1]); else mg.push([r[0],r[1]]) }
+    const gs=mg.slice(0,40);
+    if(mg.length>40) log('kontroll: túl sok eltérés ('+mg.length+') — az első 40 fut');
+    log('kontroll-futam kész: '+(mg.length?
+      mg.length+' helyen hall a turbo olyat, ami a leiratból hiányzik — pótlás indul':
+      'a leirat mindent lefed, amit a turbo hall'));
+    JOB.on=false; progShow(false);
+    if(gs.length){ const o=passOpts(); await runHoles(rec,M,gs,'kontroll-pótlás',o) }
+    else toast('kontroll-futam: nincs hiányzó szakasz',6000);
+  }catch(e){
+    log('kontroll-futam megállt:',e);
+    progSet(99,'megállt',String(e.message).slice(0,150));
+    $('progStop').textContent='bezár'; $('progHide').classList.remove('hid');
+  }finally{ JOB.on=false; drawCost(); }
+}
 async function runJob(rec,M,from,to,opts){
   opts=opts||{};
   if(JOB.on){ toast('már fut egy feldolgozás'); return }
@@ -4498,9 +4699,68 @@ async function runJob(rec,M,from,to,opts){
       if(piece.blob.size>24*1024*1024)
         throw new Error('a szelet '+fmtMB(piece.blob.size)+', a felismerő 25 MB-ig fogad — '+
           'állítsd kisebbre a szeletméretet a beállításokban');
-      let d=null, err=null;
+      let d=null, err=null, sen=null;
+      /* ======== v86: PRECÍZ MÓD ========
+         A már dekódolt szeletet a Silero térképe alapján ≤28 mp-es,
+         beszédhatáros ablakokra bontjuk, és azokat kérdezzük egyenként.
+         Több kérés (a v84-es ütemező kordában tartja), de a 30 mp-es
+         dekódolási ablakon belül maradva a modellnek nincs hova ugrania. */
+      let precW=null;
+      if(CFG.slice==='prec'&&piece.pcm&&piece.f32&&await vadEnsure()){
+        try{ precW=await precWindows(piece) }
+        catch(e){ log('precíz szeletelés hiba: '+String(e&&(e.message||e)).slice(0,60)+
+                      ' — normál szelet megy'); precW=null }
+      }
+      if(precW){
+        log('precíz mód: '+precW.length+' beszédhatáros ablak ('+
+            fmtT(t0)+' → '+fmtT(piece.t1)+')');
+        sen=[];
+        for(let wi=0;wi<precW.length&&!JOB.stop;wi++){
+          const rel=precW[wi];
+          const wBlob=wavF32(piece.f32.subarray(
+            Math.round(rel[0]*PCM_SR),Math.round(rel[1]*PCM_SR)));
+          progSet(pct,'felismerés (precíz)',
+            fmtT(piece.fT0+rel[0])+' → '+fmtT(piece.fT0+rel[1])+' · '+
+            (wi+1)+'/'+precW.length+' · '+rec.sen.length+' mondat');
+          let dw=null;
+          for(let att=0;att<3&&!JOB.stop;att++){
+            try{ dw=await asrCall(wBlob,'r.wav',rel[1]-rel[0],
+                   CFG.hint===0?'':hint); break }
+            catch(e){
+              log('felismerő hiba',e.status||'',String(e.message).slice(0,120));
+              if(e.status===401||e.status===403) throw e;
+              const wait=e.retry?Math.min(60,e.retry):(att+1)*6;
+              progSet(pct,'felismerés (precíz)','várakozás '+wait+' s');
+              for(let s=0;s<wait&&!JOB.stop;s++) await sleep(1000);
+            }
+          }
+          if(!dw){
+            qcAll.push([piece.fT0+rel[0],piece.fT0+rel[1]]);
+            log('precíz mód: a '+fmtT(piece.fT0+rel[0])+'–'+fmtT(piece.fT0+rel[1])+
+                ' ablak nem ment át — pótlásra jelölve');
+            continue;
+          }
+          if(llmOk()){
+            const np=await punctAsr(dw);
+            if(np) log('írásjelezés: '+np+' szó jelölve (precíz ablak)');
+          }
+          const ws=toSentences(dw,piece.fT0+rel[0]);
+          sen.push(...ws);
+          if(ws.length) hint=ws[ws.length-1].en;
+          /* a QC-vizsgálat közös d-t vár: a szegmenseket a szelet idejére toljuk */
+          if(!d) d={segments:[]};
+          for(const g of (dw.segments||[])) d.segments.push({
+            compression_ratio:g.compression_ratio, avg_logprob:g.avg_logprob,
+            no_speech_prob:g.no_speech_prob,
+            start:(+g.start||0)+rel[0]+(piece.fT0-piece.t0),
+            end:(+g.end||0)+rel[0]+(piece.fT0-piece.t0)});
+        }
+        if(JOB.stop) break;
+        if(!d) d={segments:[]};
+      }else{
       for(let attempt=0;attempt<3&&!JOB.stop;attempt++){
-        try{ d=await asrCall(piece.blob,piece.name,piece.t1-piece.t0,hint); err=null; break }
+        try{ d=await asrCall(piece.blob,piece.name,piece.t1-piece.t0,
+               CFG.hint===0?'':hint); err=null; break }
         catch(e){
           err=e; log('felismerő hiba',e.status||'',String(e.message).slice(0,150));
           if(e.status===401||e.status===403) break;
@@ -4517,7 +4777,8 @@ async function runJob(rec,M,from,to,opts){
         const np=await punctAsr(d);
         if(np) log('írásjelezés: '+np+' szó jelölve a tagolás előtt ('+fmtT(t0)+' → '+fmtT(t1)+')');
       }
-      let sen=toSentences(d,piece.t0);
+      sen=toSentences(d,piece.t0);
+      }
       /* a felismerő időbélyege néha túllóg a szeleten; a lejátszó ilyenkor
          hibás mondatnál állna, ezért a szelet határára szorítjuk */
       const cap=Math.min(piece.t1,rec.dur||piece.t1);
@@ -4541,6 +4802,34 @@ async function runJob(rec,M,from,to,opts){
         if(cr>2.4||lp<-1.1||(ns>0.5&&lp<-0.6))
           qcAll.push([Math.max(0,ga-0.8),Math.min(rec.dur||gb+0.8,gb+0.8)]);
       }
+      /* ======== v85: BESZÉDTÉRKÉP-ELLENŐRZÉS ========
+         Ahol a mondatok közt ≥1,4 s lyuk van, ott megnézzük a lyuk HANGJÁT:
+         ha a Silero ≥0,9 s beszédet lát benne, az bizonyított kihagyás —
+         nem heurisztika, hanem a hang tanúsága. Ezek a futam végi pótló
+         körben célzottan újra lesznek kérdezve. */
+      if(piece.f32&&await vadEnsure()){
+        try{
+          const cap2=Math.min(piece.t1,rec.dur||piece.t1);
+          const lyuk=[]; let cur=t0+0.3;
+          const benn=sen.filter(s=>s.b>t0&&s.a<cap2).sort((x,y)=>x.a-y.a);
+          for(const s of benn){ if(s.a-cur>=1.4) lyuk.push([cur,s.a]); cur=Math.max(cur,s.b) }
+          if(cap2-0.3-cur>=1.4) lyuk.push([cur,cap2-0.3]);
+          let vTal=0;
+          for(const g of lyuk.slice(0,12)){
+            const i0=Math.max(0,Math.round((g[0]-piece.fT0)*PCM_SR)),
+                  i1b=Math.min(piece.f32.length,Math.round((g[1]-piece.fT0)*PCM_SR));
+            if(i1b-i0<PCM_SR) continue;
+            const map=await speechMap(piece.f32.subarray(i0,i1b));
+            for(const m of map){ if(m[1]-m[0]>=0.9){
+              qcAll.push([Math.max(0,g[0]+m[0]-0.4),
+                          Math.min(rec.dur||1e9,g[0]+m[1]+0.4)]);
+              vTal++; } }
+          }
+          if(vTal) log('beszédtérkép: '+vTal+' beszédszakasz leirat nélkül ('+
+            fmtT(t0)+' → '+fmtT(t1)+') — pótlásra jelölve');
+        }catch(e){ log('beszédtérkép hiba: '+String(e&&(e.message||e)).slice(0,60)) }
+      }
+      if(piece.f32) piece.f32=null;                    /* memória vissza */
       /* a szelet végén félbehagyott mondat a következő körben, átfedésből jön.
          v83: ha a szelet vége csendhatárra lett igazítva, ott mondat nem törhet
          ketté — az írásjel hiánya ilyenkor a felismerő pongyolasága, nem
@@ -7717,6 +8006,8 @@ async function sheetProcess(){
         ' — '+gs.length+' hézag · '+fmtT(gapSec(gs))+' · ~'+passCalls(gs)+' kérés',
         pri:1,fn:()=>goGaps()};
     })(),
+    (REC.sen&&REC.sen.length>30)?{t:'kontroll-futam: turbo keresztellenőrzés '+
+      '(~'+passCalls([[0,dur]])+' kérés az olcsó modellel)',fn:()=>goCross()}:null,
     {t:'innentől 10 perc',fn:()=>go(t,Math.min(dur,t+600))},
     {t:'innentől 30 perc',fn:()=>go(t,Math.min(dur,t+1800))},
     {t:'innentől a végéig',fn:()=>go(t,dur)},
@@ -7727,6 +8018,12 @@ async function sheetProcess(){
     catch(e){ return toast('a hang szerkezete nem olvasható: '+e.message,5000) }
     if(!MED) return toast('a hang nem elérhető');
     runGaps(REC,MED,GAP_MIN);
+  }
+  async function goCross(){
+    try{ await prepMedia() }
+    catch(e){ return toast('a hang szerkezete nem olvasható: '+e.message,5000) }
+    if(!MED) return toast('a hang nem elérhető');
+    runCross(REC,MED);
   }
   async function go(a,b){
     try{ await prepMedia() }
@@ -8165,6 +8462,14 @@ function drawSet(){
   segFill($('segPcm'),[[1,'javított (WAV)'],[0,'nyers szelet']],CFG.pcm===0?0:1,k=>{
     CFG.pcm=+k; pcmFail=0; saveCfg(); drawSet();
     toast(+k?'javított hang-előkészítés — kevesebb kihagyás':'nyers szeletküldés',3000) });
+  segFill($('segVad'),[[1,'be'],[0,'ki']],CFG.vad===0?0:1,k=>{
+    CFG.vad=+k; if(+k) vadState=0; saveCfg(); drawSet();
+    toast(+k?'beszédtérkép be — bizonyíték-alapú pótlás':'beszédtérkép ki',3000) });
+  segFill($('segSlice'),[['norm','normál'],['prec','precíz (≤28 mp)']],
+    CFG.slice==='prec'?'prec':'norm',k=>{ CFG.slice=k; saveCfg(); drawSet();
+    toast(k==='prec'?'precíz mód — beszédhatáros rövid ablakok':'normál szeletelés',3000) });
+  segFill($('segHint'),[[1,'be'],[0,'ki']],CFG.hint===0?0:1,k=>{
+    CFG.hint=+k; saveCfg(); drawSet() });
   segFill($('segWords'),[[1,'szó szerinti követés'],[0,'csak mondat']],CFG.words?1:0,k=>{
     CFG.words=k; saveCfg(); drawSet() });
   segFill($('segTr'),[['free','ingyenes'],['claude','Claude'],['oai','egyéb API']],CFG.tr,k=>{
