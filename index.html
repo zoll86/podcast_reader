@@ -1042,7 +1042,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v83';
+const APP_VER='v84';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -2088,6 +2088,50 @@ async function postForm(url,headers,fd,ms){
     return r;
   }
 }
+/* ======== v84: KÉRÉS-ÜTEMEZÉS ========
+   A v83-as napló megmutatta: a pótló futam kb. minden második kérése 429
+   (a Groq percenkénti kérés-korlátja), amit 6-7 mp várakozás követ — az idő
+   fele várakozás volt, és minden 429 elhasznált egyet a 3 próbálkozásból.
+   Két réteg:
+   1. ELŐRELÁTÓ: a Groq minden sikeres válaszban megmondja, hány kérés maradt
+      (x-ratelimit-remaining-requests) és mikor töltődik újra
+      (x-ratelimit-reset-requests, pl. "7.66s" vagy "1m2.5s"). Ha elfogyott,
+      a következő kérés magától megvárja az újratöltést — 429 nem is születik.
+   2. ALKALMAZKODÓ: ha mégis jön 429 (pl. a fejléceket a CORS nem engedi át),
+      a kérések közé állandó szünet kerül (3,2 mp = 18/perc), ami sikerekkel
+      lassan visszaépül nullára. */
+let asrNextAt=0, asrGapMs=0, asrPaceSaid=0;
+function asrResetMs(s){
+  const m=String(s||'').match(/(?:(\d+)m)?([\d.]+)s/);
+  if(!m) return 0;
+  return ((+m[1]||0)*60+(+m[2]||0))*1000;
+}
+async function asrPace(){
+  for(;;){ const w=asrNextAt-Date.now(); if(w<=0) break;
+    await sleep(Math.min(w,1000)) }
+  asrNextAt=Date.now()+asrGapMs;
+}
+function asrPaceFeed(r,ok){
+  try{
+    if(ok){
+      asrGapMs=Math.max(0,asrGapMs-250);
+      const rem=r.hdr('x-ratelimit-remaining-requests');
+      if(rem!=null&&+rem<=0){
+        const ms=asrResetMs(r.hdr('x-ratelimit-reset-requests'))||3000;
+        asrNextAt=Math.max(asrNextAt,Date.now()+ms);
+        log('ütemezés: a perc-keret elfogyott — '+Math.round(ms/100)/10+
+            ' s szünet a következő kérés előtt (429 helyett)');
+      }
+      return;
+    }
+    if(r.status===429){
+      asrGapMs=Math.min(6000,Math.max(asrGapMs,3200));
+      if(!asrPaceSaid){ asrPaceSaid=1;
+        log('ütemezés: 429 jött — mostantól '+asrGapMs/1000+
+            ' s szünet a kérések közt, sikerekkel fokozatosan gyorsul'); }
+    }
+  }catch(e){}
+}
 async function asrCall(blob,fileName,secs,hintPrev,temp,opts){
   if(!CFG.asrKey) throw new Error('nincs megadva a felismerő kulcsa (⚙ Beállítások)');
   const url=asrUrl(); if(!url) throw new Error('nincs megadva a felismerő végpontja');
@@ -2106,8 +2150,10 @@ async function asrCall(blob,fileName,secs,hintPrev,temp,opts){
      ezért az eddigi „második átfutás" gyakran semmit nem talált. A prompt
      elhagyása és a más modell viszont valóban más eredményt ad. */
   if(hintPrev&&!opts.noPrompt) fd.append('prompt',hintPrev.slice(-200));
+  await asrPace();                       /* v84: várakozás, MIELŐTT falnak megyünk */
   const r=await postForm(url+'/audio/transcriptions',
     {'Authorization':'Bearer '+CFG.asrKey}, fd, 240000);
+  asrPaceFeed(r,r.ok);
   if(!r.ok){
     const t=String(r.body||'');
     const e=new Error('felismerés '+r.status+': '+t.slice(0,200).replace(/\s+/g,' '));
