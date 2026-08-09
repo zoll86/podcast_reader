@@ -1033,7 +1033,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v81';
+const APP_VER='v82';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -3994,12 +3994,293 @@ function passOpts(){
   if(asrModel()==='whisper-large-v3-turbo') o.model='whisper-large-v3';
   return o;
 }
+/* ======== v82: A PÓTLÁS TÖBB ABLAKKAL KÉRDEZ, ÉS CSERÉLNI IS TUD ========
+   Két mért hiba volt, mindkettő a The White Vault 1. részén bizonyítva:
+
+   1. AZ ABLAK GEOMETRIÁJA DÖNT. A Whisper (a helyi tiny ugyanúgy, mint a
+      Groq large-v3) a halkabb/torzabb beszédet ÁTUGORJA, ha az ablakban ott
+      van utána egy tiszta, hangos mondat — a dekóder odaugrik. A 8:09–8:35
+      lyukra a teljes ablak ([488,516]) semmit nem adott, a két FÉL-ablak
+      ([484,504] és [500,516]) mindent. Ezért lyukanként legfeljebb három
+      geometria fut: szűk, elülső fél, hátsó fél — és amint a lyuk betelt,
+      a többi kérdés elmarad.
+
+   2. A passKeep A JAVÍTÁST DOBTA EL. A törött blokk („…negative 17 degrees
+      Hello everyone…") szavainak nagy része benne van a JAVÍTOTT mondatban
+      is, így a 70%-os ismétlés-szűrő pont a jó verziót szűrte ki. Ezért a
+      beolvasztás előtt CSERE fut: ha az összegyűjtött új anyag a törött
+      blokk szavainak legalább 75%-át lefedi, a törött blokk kikerül (a
+      félrefordított magyarjával együtt), és a helyére az új mondatok jönnek.
+      A fél-mondat (ami a felismerés csonkán kezdett) hasonlóan cserélődik:
+      ha egy új mondat a meglévő szavainak ≥85%-át tartalmazza és legalább
+      3 szóval bővebb, a bővebb marad. Szöveg így SOSEM vész el — csere csak
+      akkor van, ha az új tartalmazza a régit. */
+const HOLE_FILL=2.0;      /* ekkora fedetlen folt alatt a lyuk betöltöttnek számít */
+
+/* a lyukat körülvevő TÖRÖTT mondatok (a senHoles ismérvei szerint) */
+function brokenIn(rec,a,b){
+  const out=[];
+  for(const sn of rec.sen||[]){
+    if(sn.b<=a-0.3||sn.a>=b+0.3) continue;
+    const w=Array.isArray(sn.w)?sn.w.filter(x=>typeof x==='number'):null;
+    if(w&&w.length>1){
+      let res=0;
+      for(let i=0;i<w.length-1;i++) res=Math.max(res,w[i+1]-w[i]);
+      res=Math.max(res,(sn.b||0)-w[w.length-1]);
+      if(res>=HOLE_RES){ out.push(sn); continue }
+    }
+    const h=(sn.b||0)-(sn.a||0);
+    const sz=String(sn.en||'').trim().split(/\s+/).filter(Boolean).length;
+    if(h>=6&&sz>0&&(sz/h)<HOLE_DENS) out.push(sn);
+  }
+  return out;
+}
+/* maradt-e még fedetlen folt a lyukban? A törött mondatok NEM számítanak
+   fedésnek (bennük van maga a hiány), az összegyűjtött új mondatok igen.
+   TÖRÖTT blokknál nem az idő dönt (a szó-idő nélküli válasz ideje csak
+   arányosítás, hazudhat), hanem a SZÖVEG: addig nyitott a lyuk, amíg az
+   összegyűjtött anyag a törött blokk szavainak 75%-át le nem fedi. */
+function holeLeft(rec,g,pool,broken){
+  if((broken||[]).length){
+    const joined=(pool||[]).map(x=>x.en).join(' ');
+    for(const B of broken) if(simWords(B.en,joined)<0.75) return true;
+    return false;
+  }
+  const a=g[0]+0.3, b=g[1]-0.3;
+  if(b-a<HOLE_FILL) return false;
+  const iv=[];
+  for(const sn of rec.sen||[])
+    if(!(broken||[]).includes(sn)&&sn.b>a&&sn.a<b) iv.push([sn.a,sn.b]);
+  for(const sn of pool||[]) if(sn.b>a&&sn.a<b) iv.push([sn.a,sn.b]);
+  iv.sort((x,y)=>x[0]-y[0]);
+  let t=a, rés=0;
+  for(const r of iv){
+    if(r[0]>t) rés=Math.max(rés,r[0]-t);
+    t=Math.max(t,r[1]);
+  }
+  rés=Math.max(rés,b-t);
+  return rés>=HOLE_FILL;
+}
+/* lyukanként a kérdező ablakok: szűk, fél- és harmad-ablakok. A mérés
+   (helyi whisper, 8:09–8:35): a dekóder a halk/torz beszédről a következő
+   TISZTA megszólalásra ugrik, ha az benne van az ablakban — a 8:03–8:24-es
+   ablak ezért üres, a 8:04–8:20-as (elülső HARMAD, a tiszta rész előtt
+   elvágva) mindent megtalál. A létra a betelt lyuknál magától megáll. */
+function probesFor(rec,g){
+  const d=rec.dur||1e9, g0=g[0], g1=g[1], L=g1-g0, mid=(g0+g1)/2;
+  const cl=x=>Math.max(0,Math.min(d,x));
+  const out=[];
+  /* hosszú lyuknál ELŐSZÖR a lyuk eleji rövid ablak: a rácsmérés szerint a
+     dekóder csak akkor írja le a halk szakaszt, ha az ablak a lyuk elején
+     kezdődik ÉS nincs benne a későbbi tiszta beszéd, amire átugorhatna */
+  if(L>8) out.push([cl(g0-1),cl(Math.min(g0+12,g1+1)),'lyuk eleje']);
+  out.push([cl(g0-1),cl(g1+1),'szűk']);
+  if(L>8){
+    out.push([cl(g0-6),cl(mid+2),'elülső fél']);
+    out.push([cl(mid-2),cl(g1+6),'hátsó fél']);
+    out.push([cl(g0-6),cl(g0+L/3+2),'elülső harmad']);
+    out.push([cl(g1-L/3-2),cl(g1+6),'hátsó harmad']);
+  }else{
+    out.push([cl(g0-6),cl(g1+2),'balra tolt']);
+    out.push([cl(g0-2),cl(g1+6),'jobbra tolt']);
+  }
+  return out.filter(w=>w[1]-w[0]>1.5);
+}
+/* az összegyűjtött jelöltek közti tartalmazás: a bővebb marad */
+function poolPrune(pool){
+  const wc=x=>norm(x.en||'').split(' ').filter(Boolean).length;
+  const srt=pool.slice().sort((x,y)=>wc(y)-wc(x));
+  const out=[];
+  for(const sn of srt){
+    if(out.some(y=>simWords(sn.en,y.en)>=0.85)) continue;
+    out.push(sn);
+  }
+  return out.sort((x,y)=>x.a-y.a);
+}
+/* csere + beolvasztás egy lyukra. Visszaadja, hány mondat került be. */
+function holeMerge(rec,g,pool,broken){
+  if(!pool.length) return {n:0,list:[]};
+  const kand=poolPrune(pool);
+  const joined=kand.map(x=>x.en).join(' ');
+  let csere=0; const kivett=[];
+  /* 1. törött blokk kivétele, ha az új anyag lefedi a szavait */
+  for(const B of broken||[]){
+    const i=rec.sen.indexOf(B);
+    if(i<0) continue;
+    const fed=simWords(B.en,joined);
+    if(fed>=0.75){
+      rec.sen.splice(i,1); csere++; kivett.push(B);
+      log('pótlás-csere (törött blokk ki, fedés '+Math.round(fed*100)+'%): '+
+          String(B.en).slice(0,60)+'…');
+    }else log('pótlás: a törött blokk marad (fedés csak '+Math.round(fed*100)+'%)');
+  }
+  /* 2. fél-mondat cseréje a bővebbre (a régi ⊆ új, legalább 3 szóval bővebb) */
+  const wc=x=>norm(x||'').split(' ').filter(Boolean).length;
+  for(const sn of kand){
+    for(let i=rec.sen.length-1;i>=0;i--){
+      const ex=rec.sen[i];
+      if(ex.b<=sn.a-2||ex.a>=sn.b+2) continue;
+      if(wc(sn.en)>=wc(ex.en)+3&&simWords(ex.en,sn.en)>=0.85){
+        rec.sen.splice(i,1); csere++;
+        log('pótlás-csere (bővebbre): '+String(ex.en).slice(0,50)+'… -> '+
+            String(sn.en).slice(0,50)+'…');
+      }
+    }
+  }
+  /* 3. ami így is ismétlés, kimarad; a többi beolvad. Ha egy visszakerülő
+     mondat szó szerint azonos egy kivettel, örökli a magyarját — így a csere
+     nem dob el jó fordítást. */
+  const kept=passKeep(rec,kand,0.5);
+  for(const sn of kept){
+    const r=kivett.find(x=>norm(x.en)===norm(sn.en));
+    if(r&&r.hu&&!sn.hu) sn.hu=r.hu;
+  }
+  const n=mergeSen(rec,kept);
+  return {n:n,csere:csere,list:kept.map(x=>({a:x.a,en:x.en}))};
+}
+/* A lyuk-pótlás futtatója. A runPass-tól az különbözteti meg, hogy lyukanként
+   TÖBB ablakot kérdez, az eredményt lyukanként EGYBEN olvasztja be, és cserél. */
+async function runHoles(rec,M,holes,cim,opts){
+  if(JOB.on){ toast('már fut egy feldolgozás'); return }
+  holes=(holes||[]).filter(r=>r&&r[1]-r[0]>0.8);
+  if(!holes.length){ toast('nincs mit újra átfutni'); return }
+  JOB.on=true; JOB.stop=false; JOB.id=rec.id;
+  progShow(true); $('progHide').classList.add('hid'); $('progStop').textContent='szüneteltetés';
+  let found=0, call=0; const ujak=[]; const total=holes.length*3;
+  try{
+    for(let hi=0;hi<holes.length&&!JOB.stop;hi++){
+      const g=holes[hi];
+      const broken=brokenIn(rec,g[0],g[1]);
+      if(broken.length) log('pótlás '+fmtT(g[0])+'–'+fmtT(g[1])+': '+broken.length+
+        ' törött blokk a lyukban');
+      const pool=[]; const probak=probesFor(rec,g); const csonkaVolt={};
+      for(let pi=0;pi<probak.length&&pi<9;pi++){
+        if(JOB.stop) break;
+        const wa=probak[pi][0], wb=probak[pi][1], cimke=probak[pi][2];
+        const mondatveg=cimke.startsWith('mondatvég');
+        if(!mondatveg&&pool.length&&!holeLeft(rec,g,pool,broken)){
+          /* betelt: a maradék RENDES ablak elmarad, a mondatvég-ablakok lefutnak */
+          const maradt=probak.slice(pi).filter(x=>String(x[2]).startsWith('mondatvég'));
+          probak.splice(pi,probak.length-pi);
+          if(!maradt.length){
+            log('pótlás: a '+fmtT(g[0])+'–'+fmtT(g[1])+' lyuk betelt — a többi ablak elmarad');
+            break;
+          }
+          log('pótlás: a lyuk betelt — már csak a csonka mondatvég ablakai futnak');
+          for(const m of maradt) probak.push(m);
+          pi--; continue;
+        }
+        call++;
+        progSet(Math.min(99,Math.round(call/total*100)),cim,
+          fmtT(wa)+' → '+fmtT(wb)+' ('+cimke+') · '+found+' új mondat');
+        let piece;
+        try{ piece=await cut(M,wa,wb) }
+        catch(e){ log('pótlás-szeletelés:',e); continue }
+        if(piece.blob.size>24*1024*1024){
+          log('pótlás: a szelet túl nagy ('+fmtMB(piece.blob.size)+')'); continue }
+        let d=null;
+        for(let att=0;att<3&&!JOB.stop;att++){
+          try{ d=await asrCall(piece.blob,piece.name,piece.t1-piece.t0,'',
+                 (opts&&opts.temp!=null)?opts.temp:0, opts||{}); break }
+          catch(e){
+            log('pótlás-felismerés',e.status||'',String(e.message).slice(0,150));
+            if(e.status===401||e.status===403) throw e;
+            const wait=e.retry?Math.min(60,e.retry):(att+1)*6;
+            progSet(Math.min(99,Math.round(call/total*100)),cim,
+              'várakozás '+wait+' s ('+String(e.message).slice(0,50)+')');
+            for(let x=0;x<wait&&!JOB.stop;x++) await sleep(1000);
+          }
+        }
+        if(!d){ log('pótlás: a '+fmtT(wa)+'–'+fmtT(wb)+' ablak nem ment át'); continue }
+        if(llmOk()){
+          const np=await punctAsr(d);
+          if(np) log('írásjelezés (pótlás): '+np+' szó jelölve');
+        }
+        const cap=Math.min(piece.t1,rec.dur||piece.t1);
+        const sen=toSentences(d,piece.t0).filter(x=>x.b>x.a).map(x=>{
+          x.b=Math.min(x.b,cap);
+          if(x.w) x.w=x.w.map(y=>Math.min(y,cap));
+          return x;
+        }).filter(x=>{ const mid=(x.a+x.b)/2;      /* csak a LYUKBA eső mondat
+          számít — a szomszéd újra-felismert (kicsit máshogy leírt) változata
+          nem jelölt, különben visszhangként duplázódna */
+          return mid>=g[0]-0.5&&mid<=g[1]+0.5 });
+        log('pótlás-ablak '+fmtT(wa)+'–'+fmtT(wb)+' ('+cimke+'): '+sen.length+' mondat');
+        pool.push(...sen);
+        /* ======== v82: CSONKA MONDATVÉG UTÁNKÉRDEZÉSE ========
+           Ha az ablak szélén ér véget egy mondat írásjel nélkül, az ablak
+           vágta el. A mérés szerint a teljes mondat CSAK a mondat elejétől
+           induló, rövid ablakból jön elő (1 mp-cel hosszabb ablak már a
+           következő tiszta megszólalásra ugrik) — ezért egy rövid létra
+           kérdez utána, és a poolPrune a leghosszabb változatot tartja meg. */
+        /* megvan-e már a csonka mondat TELJES változata? akkor a többi
+           mondatvég-ablak fölösleges */
+        if(mondatveg&&csonkaVolt.szoveg){
+          const kesz=pool.some(x=>simWords(csonkaVolt.szoveg,x.en)>=0.85&&
+            /[.!?…"'”’)\]]$/.test(x.en)&&!/(\.{2,}|[-–—])\s*$/.test(x.en)&&
+            norm(x.en).length>norm(csonkaVolt.szoveg).length);
+          if(kesz){
+            log('pótlás: a csonka mondat teljes változata megvan — a többi mondatvég-ablak elmarad');
+            let j=probak.length-1;
+            while(j>pi){ if(String(probak[j][2]).startsWith('mondatvég')) probak.splice(j,1); j--; }
+          }
+        }
+        const ut=sen[sen.length-1];
+        if(ut&&!mondatveg&&(wb-ut.b)<0.8&&
+            (!/[.!?…"'”’)\]]$/.test(ut.en)||/(\.{2,}|[-–—])\s*$/.test(ut.en))){
+          const kulcs=norm(ut.en).slice(0,60);
+          if(!csonkaVolt[kulcs]){
+            csonkaVolt[kulcs]=1; csonkaVolt.szoveg=ut.en;
+            probak.push([Math.max(0,ut.a-0.3),ut.b+3,'mondatvég +3']);
+            probak.push([Math.max(0,ut.a-0.3),ut.b+5,'mondatvég +5']);
+            probak.push([Math.max(0,ut.a-1.2),ut.b+3,'mondatvég -1/+3']);
+            log('pótlás: csonka mondatvég ("…'+ut.en.slice(-30)+'") — utánkérdezés');
+          }
+        }
+      }
+      const r=holeMerge(rec,g,pool,broken);
+      if(r.n||r.csere){
+        found+=r.n;
+        for(const x of r.list) ujak.push(x);
+        log('pótlás: '+r.n+' új mondat'+(r.csere?(' + '+r.csere+' csere'):'')+
+            ' @ '+fmtT(g[0])+'–'+fmtT(g[1]));
+        await save(rec); renderKara(true);
+      }
+    }
+    const need=rec.sen.filter(x=>!x.hu);
+    if(need.length&&!JOB.stop){
+      progSet(99,'fordítás',need.length+' új mondat');
+      await fillHu(need,()=>renderKara(true),()=>JOB.stop);
+      if(cacheDirty) saveCache();
+    }
+    await save(rec);
+    CUR=senAt(A.currentTime||0);
+    huBuild();
+    renderKara(false);
+    layoutSplit();
+    pgReset(); renderHu(true); paintCur(true); drawSeek();
+    progSet(100,JOB.stop?'megállítva':'kész',
+      found?found+' új mondat került be':'nem talált olyat, ami eddig kimaradt');
+    $('progStop').textContent='újra'; $('progHide').classList.remove('hid');
+    if(found&&ujak.length) sheetNew(ujak);
+    else toast('nem talált olyat, ami eddig kimaradt',5000);
+  }catch(e){
+    log('pótlás megállt:',e);
+    progSet(99,'megállt',String(e.message).slice(0,180));
+    $('progStop').textContent='újra'; $('progHide').classList.remove('hid');
+  }finally{
+    JOB.on=false;
+    if(cacheDirty) saveCache();
+    await save(rec);
+    drawCost(); drawLib();
+  }
+}
 const runGaps=(rec,M,minGap)=>{
   const gs=senMissing(rec,minGap);      /* v78: a buborékon belüli hiány is */
   if(!gs.length){ toast('nincs elég nagy néma folt — próbáld a második átfutást',5000); return }
   const o=passOpts();
   if(o.model) log('pótlás a pontos modellel:',o.model);
-  return runPass(rec,M,gs,'kimaradt mondatok',0.5,o);
+  return runHoles(rec,M,gs,'kimaradt mondatok',o);
 };
 async function runJob(rec,M,from,to,opts){
   opts=opts||{};
@@ -4104,6 +4385,24 @@ async function runJob(rec,M,from,to,opts){
     if(cacheDirty) saveCache();
     await save(rec);
     drawCost(); drawLib();
+  }
+  /* ======== v82: A PÓTLÁS MAGÁTÓL LEFUT AZ ELSŐ FELISMERÉS UTÁN ========
+     Eddig két gomb volt: felismerés, majd kézzel a „kimaradt mondatok
+     pótlása". Mostantól a TELJES felvételen végigért felismerés után a
+     lyuk-pótlás magától elindul — egy gombnyomás, kész, lyukmentes eredmény.
+     Részleges menetnél (innentől / kísérő mód) nem fut, ott zavarna. */
+  if(!opts.quiet&&!opts.oneShot&&!JOB.stop&&from<=1&&to>=(rec.dur||to)-1){
+    const left=nextGap(rec.done,from,to);
+    if(!left){
+      const gs=senMissing(rec,GAP_MIN);
+      if(gs.length){
+        log('felismerés kész — a kimaradt mondatok pótlása magától indul ('+
+            gs.length+' folt, '+fmtT(gapSec(gs))+')');
+        const o=passOpts();
+        if(o.model) log('pótlás a pontos modellel:',o.model);
+        await runHoles(rec,M,gs,'kimaradt mondatok',o);
+      }
+    }
   }
 }
 /* A mentés SOHA nem állíthatja meg a felismerést: ami már megvan, azért fizettünk.
@@ -7932,6 +8231,7 @@ window.HG={txtAll,txtGet,txtPut,txtDel,medAll,medGet,medDel,openMedia,cut,runJob
   huAlign, huCuts, huPick, scrollTick,
   huUnit, retrUnit, retrBack, sheetRetr, trOne, engReady, ENGN,
   senGaps, gapSec, gapKeep, passKeep, simWords, gapHint, runGaps, runPass,
+  runHoles, holeMerge, probesFor, holeLeft, poolPrune, brokenIn,
   passCalls, passRange, sheetNew, mergeSen, toSentences,
   breakLong, splitSentences, closeRec, layoutSplit, hugeUnits, splitUnits,
   wordStream, rebuildSen, rebuildText, normSen, deadSen, senAt,
