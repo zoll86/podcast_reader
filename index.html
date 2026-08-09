@@ -1071,7 +1071,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v87';
+const APP_VER='v88';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -8061,6 +8061,14 @@ async function sheetProcess(){
       'fordítása kerül tokenbe.'},
     gap&&{t:'a hátralévő rész ('+fmtT(dur-doneSec(REC.done))+')',pri:1,
       fn:()=>go(0,dur)},
+    /* v88: TISZTA ÚJRAKEZDÉS. A leirat nem a gyorsítótárban van, hanem az
+       app adatbázisában — a cache törlése ezért nem viszi el. Ez a gomb
+       elviszi: a mondatok és a feldolgozottság törlődik (a hangfájl és a
+       fordítási költség-számláló marad), és a felismerés nulláról indul a
+       teljes automatikus lánccal. */
+    (REC.sen&&REC.sen.length)?{t:'felismerés nulláról — a régi leirat törlése '+
+      'és tiszta újrakezdés ('+REC.sen.length+' mondat megy a kukába)',
+      fn:()=>goZero()}:null,
     /* Második átfutás: a `done`-t figyelmen kívül hagyja, és csak HOZZÁTESZ. A
        kérésszámot kiírjuk, mert a Groq ingyenes szintje napi 120 kérés. */
     {t:'második átfutás: a teljes felvétel (~'+passCalls([[0,dur]])+' kérés)',
@@ -8094,6 +8102,19 @@ async function sheetProcess(){
     catch(e){ return toast('a hang szerkezete nem olvasható: '+e.message,5000) }
     if(!MED) return toast('a hang nem elérhető');
     runFix(REC,MED);
+  }
+  async function goZero(){
+    if(!confirm('A régi leirat ('+REC.sen.length+' mondat) VÉGLEG törlődik, és a '+
+      'felismerés nulláról indul.\n\nA hangfájlhoz nem nyúlunk. Mehet?')) return;
+    try{ await prepMedia() }
+    catch(e){ return toast('a hang szerkezete nem olvasható: '+e.message,5000) }
+    if(!MED) return toast('a hang nem elérhető');
+    REC.sen=[]; REC.done=[];
+    await save(REC);
+    renderKara(true);
+    log('felismerés nulláról: a régi leirat törölve, tiszta újrakezdés');
+    toast('a régi leirat törölve — a felismerés nulláról indul',4000);
+    runJob(REC,MED,0,dur);
   }
   async function go(a,b){
     try{ await prepMedia() }
