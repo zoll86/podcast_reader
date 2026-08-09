@@ -109,6 +109,41 @@ jobs:
           npx @capacitor/assets generate --android || echo "ikon-generalas kihagyva"
           npx cap sync android
 
+      # -- ALÁÍRÁS EXPLICIT BEKÖTÉSE: nem bízunk a ~/.android/debug.keystore
+      #    alapértelmezésben (a CI-n a Gradle friss kulcsot generált helyette,
+      #    ezért volt MINDEN build más aláírású). A signingConfig kőbe vésve
+      #    a repó kulcsára mutat; ha a beírás nem sikerül, a build ELBUKIK. --
+      - name: Aláírás bekötése a Gradle-be
+        run: |
+          python3 - <<'PY'
+          import io,os,re,sys
+          f='android/app/build.gradle'
+          ks=os.path.join(os.environ['GITHUB_WORKSPACE'],'signing','hallgato.keystore')
+          s=io.open(f).read()
+          if 'signingConfigs' in s:
+              print('mar be van kotve'); sys.exit(0)
+          blk=("    signingConfigs {\n"
+               "        hallgato {\n"
+               "            storeFile file('"+ks+"')\n"
+               "            storePassword 'android'\n"
+               "            keyAlias 'androiddebugkey'\n"
+               "            keyPassword 'android'\n"
+               "        }\n"
+               "    }\n")
+          m=re.search(r'android\s*\{',s)
+          if not m: print('HIBA: nincs android blokk'); sys.exit(1)
+          s=s[:m.end()]+'\n'+blk+s[m.end():]
+          if re.search(r'buildTypes\s*\{',s):
+              s=re.sub(r'(buildTypes\s*\{)',
+                r'\1\n        debug { signingConfig signingConfigs.hallgato }',s,count=1)
+          else:
+              s=re.sub(r'(signingConfigs \{[\s\S]*?\n    \}\n)',
+                r'\1    buildTypes { debug { signingConfig signingConfigs.hallgato } }\n',s,count=1)
+          io.open(f,'w').write(s)
+          print('OK: alairas bekotve ->',ks)
+          PY
+          grep -n "hallgato" android/app/build.gradle
+
       - name: APK építése
         run: |
           cd android
@@ -121,6 +156,24 @@ jobs:
           VER=$(grep -o "APP_VER='v[0-9]*'" index.html | head -1 | grep -o "v[0-9]*")
           echo "verzio: $VER" > apk-verzio.txt
           echo "APK: $(du -h ketnyelvu-hallgato.apk | cut -f1)"
+
+      # -- ELLENŐRZÉS: ha az APK nem az állandó kulccsal készült, a build ELBUKIK,
+      #    hogy ez a hiba soha többé ne csússzon át némán --
+      - name: Aláírás ellenőrzése
+        run: |
+          KS_FP=$(keytool -list -keystore signing/hallgato.keystore -storepass android \
+            -alias androiddebugkey -v | grep "SHA256:" | head -1 \
+            | sed 's/.*SHA256: //' | tr -d ': ' | tr 'A-F' 'a-f')
+          APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
+          APK_FP=$("$APKSIGNER" verify --print-certs ketnyelvu-hallgato.apk \
+            | grep -i "SHA-256 digest" | head -1 | sed 's/.*: //' | tr -d ': ' | tr 'A-F' 'a-f')
+          echo "kulcstar : $KS_FP"
+          echo "apk      : $APK_FP"
+          if [ -z "$KS_FP" ] || [ "$KS_FP" != "$APK_FP" ]; then
+            echo "HIBA: az APK NEM az allando kulccsal van alairva!"
+            exit 1
+          fi
+          echo "OK: az APK az allando kulccsal keszult — a frissitesek adatvesztes nelkul telepednek."
 
       - name: Release frissítése
         uses: softprops/action-gh-release@v2
