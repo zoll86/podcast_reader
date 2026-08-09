@@ -1033,7 +1033,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v78';
+const APP_VER='v79';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -3479,104 +3479,197 @@ async function textDoctor(rec){
 
    Így egy új APK vagy egy másik telefon nem jelent újrakezdést: mentés → az
    új appban visszaállítás → minden ott folytatódik. */
-async function backupMake(){
-  const cs={v:70,at:Date.now(),app:APP_VER};
-  cs.cfg=JSON.parse(store.get('hg_cfg')||'{}');
-  cs.cache=JSON.parse(store.get('hg_cache')||'{}');
-  cs.spend=JSON.parse(store.get('hg_spend')||'{}');
-  try{ cs.showurl=JSON.parse(localStorage.getItem('showurl')||'{}') }catch(e){ cs.showurl={} }
-  /* a szövegek: hang nélkül, ahogy a tárolóban vannak */
-  cs.txt=(await txtAll()).map(r=>{ const o={...r}; delete o.blob; return o });
-  try{ cs.bank=await dbOp('bank','readonly',st=>st.getAll())||[] }catch(e){ cs.bank=[] }
-  try{ cs.media=(await dbOp('media','readonly',st=>st.getAll())||[])
-        .map(m=>{ const o={...m}; delete o.blob; delete o.cover; return o }) }catch(e){ cs.media=[] }
-  return cs;
-}
-async function backupSave(){
+/* ======== v79: MENTÉS SORONKÉNT — összeomlás nélkül ========
+   A v70-es mentés az EGÉSZ könyvtárat egyetlen szövegbe fűzte, majd egyben
+   adta át a natív oldalnak. Kétszáz felvételnél ez több tízmegabájt: a WebView
+   memóriája elfogyott, és az app KIDOBOTT a mentés közben — pont amikor a
+   legfontosabb volt. Ezért a formátum mostantól JSONL: minden sor egy önálló
+   rekord, és a fájl felvételenként, darabokban íródik. A memóriában soha nincs
+   több egyetlen felvételnél. A visszaállítás ugyanígy soronként dolgozik,
+   tehát nem kell egy óriási JSON-t egyszerre értelmezni.
+
+   A fájl a PODCAST-MAPPÁBA kerül (ott, ahol a hangok vannak), a neve
+   "hallgato-mentes-EEEEHHNN-OOPP.jsonl". A visszaállításnál a program magától
+   felsorolja a mappában talált mentéseket — nem kell keresni. */
+const BK_NEV=()=>'hallgato-mentes-'+
+  new Date().toISOString().slice(0,16).replace(/[-:T]/g,'').replace(/^(\d{8})(\d{4})$/,'$1-$2')+'.jsonl';
+
+async function backupSave(csendben){
+  const nativ=!!(typeof MAPPA!=='undefined'&&MAPPA&&MAPPA.appendText);
+  const nev=BK_NEV();
+  let sorok=0, bajt=0, elso=true;
+  const kuld=async (obj,utolso)=>{
+    const sor=JSON.stringify(obj)+'\n';
+    sorok++;
+    if(nativ){
+      const r=await MAPPA.appendText({name:nev,text:sor,first:elso,last:!!utolso});
+      bajt=r&&r.bytes||bajt;
+    }else{ (kuld.buf=kuld.buf||[]).push(sor) }
+    elso=false;
+  };
   try{
-    toast('mentés készül…',2500);
-    const cs=await backupMake();
-    const js=JSON.stringify(cs);
-    const nev='hallgato-mentes-'+new Date().toISOString().slice(0,16).replace(/[:T]/g,'')+'.json';
-    dl(nev,js);                      /* dl(név, szöveg) — a meglévő letöltő */
-    log('mentés:',cs.txt.length,'felvétel,',Object.keys(cs.cache).length,'fordítás,',
-        (cs.cfg.lists||[]).length,'lista,',Math.round(js.length/1024),'kB');
-    toast(cs.txt.length+' felvétel · '+Object.keys(cs.cache).length+' fordítás · '+
-      Math.round(js.length/1024)+' kB mentve',6000);
-  }catch(e){ log('mentés:',e); toast('a mentés nem sikerült: '+String(e.message).slice(0,110),6000) }
+    if(!csendben){ progShow(true); $('progHide').classList.add('hid'); progSet(1,'mentés','előkészítés') }
+    const fej={t:'fej',v:79,at:Date.now(),app:APP_VER,
+      cfg:JSON.parse(store.get('hg_cfg')||'{}'),
+      spend:JSON.parse(store.get('hg_spend')||'{}')};
+    try{ fej.showurl=JSON.parse(localStorage.getItem('showurl')||'{}') }catch(e){}
+    await kuld(fej);
+    const c=JSON.parse(store.get('hg_cache')||'{}');
+    const kul=Object.keys(c);
+    for(let i=0;i<kul.length;i+=500){
+      const d={};
+      for(const k of kul.slice(i,i+500)) d[k]=c[k];
+      await kuld({t:'cache',d:d});
+    }
+    try{
+      const bank=await dbOp('bank','readonly',st=>st.getAll())||[];
+      for(let i=0;i<bank.length;i+=200) await kuld({t:'bank',d:bank.slice(i,i+200)});
+    }catch(e){}
+    const ids=(await txtAll()).map(r=>r.id);
+    for(let i=0;i<ids.length;i++){
+      let r=null;
+      try{ r=await txtGet(ids[i]) }catch(e){}
+      if(r){ const o={...r}; delete o.blob; await kuld({t:'rec',d:o}) }
+      if(!csendben&&(i%5===0)) progSet(5+i/Math.max(1,ids.length)*92,'mentés',
+        (i+1)+' / '+ids.length+' felvétel · '+Math.round(bajt/1024)+' kB');
+      if(i%12===11) await sleep(0);
+    }
+    await kuld({t:'veg',db:sorok},true);
+    if(!nativ){ dl(nev,(kuld.buf||[]).join('')) }
+    if(!csendben){
+      progSet(100,'kész',ids.length+' felvétel · '+Math.round(bajt/1024)+' kB');
+      $('progStop').textContent='rendben'; $('progHide').classList.remove('hid');
+    }
+    store.set('bk_last',String(Date.now()));
+    log('mentés:',nev,ids.length,'felvétel,',sorok,'sor,',Math.round(bajt/1024),'kB');
+    if(!csendben) toast('mentés kész: '+nev+'  ('+ids.length+' felvétel, '+
+      Math.round(bajt/1024)+' kB) — a podcast-mappában van',8000);
+    return nev;
+  }catch(e){
+    log('mentés:',e);
+    if(!csendben){ progSet(99,'megállt',String(e.message).slice(0,150));
+      $('progStop').textContent='újra'; $('progHide').classList.remove('hid');
+      toast('a mentés megállt: '+String(e.message).slice(0,110),7000) }
+    return null;
+  }
 }
-/* a visszaállítás ÖSSZEFÉSÜL: ami már megvan, marad; ami hiányzik, bekerül */
+
 async function backupLoad(txt){
-  let cs;
+  const sorok=String(txt||'').split(/\r?\n/).filter(x=>x.trim());
+  if(!sorok.length) return toast('a mentés-fájl üres',5000);
+  if(sorok.length<3&&sorok[0].trim().startsWith('{')&&/"txt"\s*:/.test(sorok[0])){
+    return backupLoadOld(sorok.join(''));
+  }
+  let fej=null, recs=0, cache=0, bank=0;
+  const megl={};
+  try{ (await txtAll()).forEach(r=>{ megl[r.id]=r }) }catch(e){}
+  const c=JSON.parse(store.get('hg_cache')||'{}');
+  progShow(true); $('progHide').classList.add('hid'); progSet(1,'visszaállítás','olvasás');
+  try{
+    for(let i=0;i<sorok.length;i++){
+      let o=null;
+      try{ o=JSON.parse(sorok[i]) }catch(e){ continue }
+      if(!o||!o.t) continue;
+      if(o.t==='fej') fej=o;
+      else if(o.t==='cache'){ for(const k in o.d) if(c[k]==null){ c[k]=o.d[k]; cache++ } }
+      else if(o.t==='bank'){ for(const b of (o.d||[])){
+        try{ await dbOp('bank','readwrite',st=>st.put(b)); bank++ }catch(e){} } }
+      else if(o.t==='rec'&&o.d&&o.d.id){
+        const m=megl[o.d.id];
+        if(!m||(!(m.sen||[]).length&&(o.d.sen||[]).length)){ await txtPut(o.d); recs++ }
+      }
+      if(i%10===0) progSet(2+i/sorok.length*95,'visszaállítás',recs+' felvétel · '+cache+' fordítás');
+      if(i%20===19) await sleep(0);
+    }
+    store.set('hg_cache',JSON.stringify(c));
+    let ujl=0, ujle=0;
+    if(fej&&fej.cfg){
+      const be=fej.cfg;
+      ['asrKey','clKey','oaiKey','ttsKey','asr','asrUrl','asrModel','tr','clModel','words','pairs',
+       'kfs','font','huMode','rate','trMode','immSec','learn'].forEach(k=>{
+        if(be[k]!=null&&(CFG[k]==null||CFG[k]===''||k.endsWith('Key'))) CFG[k]=be[k];
+      });
+      for(const l of (be.lists||[])){
+        let t=lists().find(x=>String(x.name||'').toLowerCase()===String(l.name||'').toLowerCase());
+        if(!t){ t=listNew(l.name,[]); ujl++ }
+        for(const id of (l.items||[])) if(t.items.indexOf(id)<0){ t.items.push(id); ujle++ }
+      }
+      try{ if(fej.showurl) localStorage.setItem('showurl',JSON.stringify(fej.showurl)) }catch(e){}
+      saveCfg();
+    }
+    drawLib(); drawSet&&drawSet();
+    progSet(100,'kész',recs+' felvétel · '+cache+' fordítás · '+ujl+' lista');
+    $('progStop').textContent='rendben'; $('progHide').classList.remove('hid');
+    log('visszaállítás:',recs,'felvétel,',cache,'fordítás,',bank,'szó,',ujl,'lista');
+    toast('visszaállítva: '+recs+' felvétel · '+cache+' fordítás · '+ujl+' lista · '+ujle+' listaelem',8000);
+  }catch(e){
+    log('visszaállítás:',e);
+    progSet(99,'megállt',String(e.message).slice(0,150));
+    $('progStop').textContent='újra'; $('progHide').classList.remove('hid');
+  }
+}
+async function backupLoadOld(txt){
+  let cs=null;
   try{ cs=JSON.parse(txt) }catch(e){ return toast('ez nem mentés-fájl',5000) }
   if(!cs||!cs.txt) return toast('ez nem a Kétnyelvű hallgató mentése',5000);
-  const db=(cs.txt||[]).length, dl2=((cs.cfg||{}).lists||[]).length;
-  if(!confirm('Visszaállítás a mentésből:\n\n• '+db+' felvétel szövege és fordítása\n• '+
-    dl2+' lista\n• beállítások és kulcsok\n• '+Object.keys(cs.cache||{}).length+' gyorstárazott fordítás\n\n'+
-    'A meglévő adataidhoz hozzáfésülöm — ami már megvan, azt nem írja felül. Folytatom?')) return;
-  let uj=0, volt=0;
-  try{
-    const megl={};
-    (await txtAll()).forEach(r=>{ megl[r.id]=r });
-    for(const r of cs.txt){
-      if(megl[r.id]){ volt++;
-        /* a meglévőt csak akkor gazdagítjuk, ha ott nincs szöveg, itt meg van */
-        const m=megl[r.id];
-        if((!(m.sen||[]).length)&&(r.sen||[]).length){ await txtPut(r); uj++ }
-        continue;
-      }
-      await txtPut(r); uj++;
-    }
-    /* fordítás-gyorstár: összefésülés */
-    const c=JSON.parse(store.get('hg_cache')||'{}');
-    let ujc=0;
-    for(const k of Object.keys(cs.cache||{})) if(c[k]==null){ c[k]=cs.cache[k]; ujc++ }
-    store.set('hg_cache',JSON.stringify(c));
-    /* beállítások: a kulcsok és a listák a mentésből, a többi marad a mostani */
-    const be=cs.cfg||{};
-    ['asrKey','clKey','oaiKey','ttsKey','asr','asrUrl','asrModel','tr','clModel','words','pairs',
-     'kfs','font','huMode','rate','trMode','immSec','learn'].forEach(k=>{
-      if(be[k]!=null&&(CFG[k]==null||CFG[k]===''||k.endsWith('Key'))) CFG[k]=be[k];
-    });
-    /* listák: a hiányzókat vesszük át, a meglévőket bővítjük */
-    const most=lists(); let ujl=0, ujle=0;
-    for(const l of (be.lists||[])){
-      let t=most.find(x=>String(x.name||'').toLowerCase()===String(l.name||'').toLowerCase());
-      if(!t){ t=listNew(l.name,[]); ujl++ }
-      for(const id of (l.items||[])) if(t.items.indexOf(id)<0){ t.items.push(id); ujle++ }
-    }
-    saveCfg();
-    /* szótanuló bank */
-    let ujb=0;
-    for(const b of (cs.bank||[])){ try{ await dbOp('bank','readwrite',st=>st.put(b)); ujb++ }catch(e){} }
-    try{ if(cs.showurl) localStorage.setItem('showurl',JSON.stringify(cs.showurl)) }catch(e){}
-    drawLib(); drawSet&&drawSet();
-    log('visszaállítás:',uj,'új felvétel,',volt,'már megvolt,',ujc,'fordítás,',ujl,'lista,',ujb,'szó');
-    toast('visszaállítva: '+uj+' felvétel · '+ujc+' fordítás · '+ujl+' lista · '+ujle+' listaelem',7000);
-  }catch(e){ log('visszaállítás:',e);
-    toast('a visszaállítás megállt: '+String(e.message).slice(0,110),6000) }
+  const sorok=[JSON.stringify({t:'fej',cfg:cs.cfg,spend:cs.spend,showurl:cs.showurl})];
+  if(cs.cache) sorok.push(JSON.stringify({t:'cache',d:cs.cache}));
+  if(cs.bank) sorok.push(JSON.stringify({t:'bank',d:cs.bank}));
+  for(const r of cs.txt) sorok.push(JSON.stringify({t:'rec',d:r}));
+  return backupLoad(sorok.join('\n'));
 }
+
 async function backupPick(){
-  /* v73: natív appban a rendszer fájlválasztóját kérjük a pluginon keresztül —
-     a WebView beépített <input type=file> útja nem mindig ad tartalmat */
-  if(typeof MAPPA!=='undefined'&&MAPPA&&MAPPA.pickText){
+  const items=[];
+  let van=[];
+  if(typeof MAPPA!=='undefined'&&MAPPA&&MAPPA.listBackups){
     try{
-      const r=await MAPPA.pickText();
-      if(r&&r.text) return backupLoad(r.text);
-      return toast('a fájl üres volt',4000);
-    }catch(e){
-      log('mentés választása (natív):',e);
-      if(/nem valasztottal/i.test(String(e.message||''))) return;
-    }
+      const r=await MAPPA.listBackups();
+      van=(r.files||[]).sort((a,b)=>(b.mtime||0)-(a.mtime||0));
+    }catch(e){ log('mentések keresése:',e) }
   }
-  const i=document.createElement('input');
-  i.type='file'; i.accept='.json,application/json';
-  i.onchange=async()=>{
-    const f=i.files&&i.files[0]; if(!f) return;
-    try{ await backupLoad(await f.text()) }
-    catch(e){ log('mentés beolvasása:',e); toast('a fájl nem olvasható',5000) }
-  };
-  i.click();
+  if(van.length){
+    items.push({note:'A podcast-mappában '+van.length+' mentést találtam. A legfrissebb van elöl.'});
+    for(const f of van.slice(0,10)){
+      const d=f.mtime?new Date(f.mtime):null;
+      items.push({t:f.name+'  ·  '+Math.max(1,Math.round((f.size||0)/1024))+' kB'+
+        (d?'  ·  '+d.toLocaleString('hu-HU',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}):''),
+        pri:f===van[0]?1:0,
+        fn:async()=>{ closeSheet();
+          try{ const t=await MAPPA.readText({uri:f.uri}); await backupLoad(t.text) }
+          catch(e){ log('mentés beolvasása:',e); toast('nem tudtam beolvasni: '+String(e.message).slice(0,100),6000) } }});
+    }
+  }else{
+    items.push({note:'A podcast-mappában nem találtam mentés-fájlt. Válaszd ki kézzel, '+
+      'vagy készíts újat a „mentés fájlba" gombbal.'});
+  }
+  items.push({t:'fájl választása kézzel',fn:async()=>{
+    closeSheet();
+    if(typeof MAPPA!=='undefined'&&MAPPA&&MAPPA.pickText){
+      try{ const r=await MAPPA.pickText(); if(r&&r.text) return backupLoad(r.text) }
+      catch(e){ if(/nem valasztottal/i.test(String(e.message||''))) return; log('fájlválasztás:',e) }
+    }
+    const i=document.createElement('input');
+    i.type='file'; i.accept='.json,.jsonl,application/json';
+    i.onchange=async()=>{ const f=i.files&&i.files[0]; if(!f) return;
+      try{ await backupLoad(await f.text()) }catch(e){ toast('a fájl nem olvasható',5000) } };
+    i.click();
+  }});
+  sheet('visszaállítás mentésből',items);
+}
+
+/* v79: NAPI AUTOMATIKUS MENTÉS a mappába, csendben. Így akkor is van friss
+   mentés, ha elfelejtenéd — és az APK-cserénél nincs mit veszíteni. */
+async function backupAuto(){
+  try{
+    if(!(typeof MAPPA!=='undefined'&&MAPPA&&MAPPA.appendText)) return;
+    const cur=await MAPPA.current(); if(!cur||!cur.uri) return;
+    const volt=+(store.get('bk_last')||0);
+    if(Date.now()-volt < 20*3600*1000) return;
+    if(!(await txtAll()).length) return;
+    const nev=await backupSave(true);
+    if(nev) log('automatikus napi mentés:',nev);
+  }catch(e){ log('automatikus mentés:',e) }
 }
 
 /* v52: kézi duplikátum-tisztítás a már sérült felvételekre — lefuttatja a
@@ -5511,7 +5604,7 @@ $('fPickAll').onclick=()=>pickAll(true);
 $('fPickNone').onclick=()=>pickAll(false);
 $('fPickGo').onclick=()=>pickToList();
 $('fPickOff').onclick=()=>pickSet(false);
-$('bkSave').onclick=backupSave;
+$('bkSave').onclick=()=>backupSave(false);
 /* v71: natív appban látszik a közvetlen APK-letöltés is */
 addEventListener('load',()=>{ if(NATIV) $('bApk').classList.remove('hid') });
 $('bApk').onclick=()=>{ try{ open(APK_URL,'_blank') }catch(e){ location.href=APK_URL } };
@@ -5533,7 +5626,9 @@ if(!CFG.asrKey) $('engWrap').classList.remove('hid');
 /* v56: a behúzó telefonon csukva indul — ritka művelet ne foglalja a könyvtárat */
 if(matchMedia('(hover:none)').matches) $('intake').classList.add('closed');
 /* v63: a Podcast-mappa csak a natív appban (APK) jelenik meg */
-addEventListener('load',()=>{ folderInit().catch(e=>log('mappa-indítás:',e)) });
+addEventListener('load',()=>{ folderInit()
+  .then(()=>setTimeout(()=>backupAuto().catch(e=>log('napi mentés:',e)),8000))
+  .catch(e=>log('mappa-indítás:',e)) });
 /* v64: műsorok */
 $('showTog').onclick=()=>$('showBody').classList.toggle('hid');
 $('showFind').addEventListener('input',showsDraw);
