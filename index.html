@@ -1082,7 +1082,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v90';
+const APP_VER='v91';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -4803,18 +4803,18 @@ async function runFix(rec,M){
    állandó értesítés + részleges ébrenlét-zár); böngészőben, ahol ez nincs,
    a sor addig fut, amíg a lap nyitva van. */
 let QSTOP=false;
-async function runQueue(){
+/* v91: a sor a LISTA lapjáról indul, és a lista részeit kapja meg — a kész
+   (már felismert) részeket a hívó szűri ki, itt csak biztonsági háló van.
+   Hallgatás közben is futhat: a lejátszó a felismeréstől független. */
+async function runQueue(recsIn,cimke){
   if(JOB.on){ toast('már fut egy feldolgozás'); return }
-  if(!MAPPA){ toast('a sorozat-előfelismeréshez a mappás alkalmazás (APK) kell'); return }
-  let all=[];
-  try{ all=await txtAll() }catch(e){ return toast('a könyvtár nem olvasható') }
-  const todo=all.filter(r=>!(r.sen||[]).length&&r.saf)
-    .sort((a,b)=>String(a.name||'').localeCompare(String(b.name||''),'hu'));
-  if(!todo.length) return toast('nincs szöveg nélküli felvétel a könyvtárban — '+
-    'a mappából egyszer megnyitott részek kerülnek ide',6000);
-  if(!confirm('Előfelismerés: '+todo.length+' rész, egymás után, angol szövegre.\n\n'+
-    'Képernyőzár alatt is fut (értesítés jelzi, amíg dolgozik). A fordítás most '+
-    'NEM készül el — az akkor jön, amikor az epizódot hallgatod. Indulhat?')) return;
+  if(!MAPPA){ toast('az előfelismeréshez a mappás alkalmazás (APK) kell'); return }
+  const todo=(recsIn||[]).filter(r=>r&&!(r.sen||[]).length&&r.saf);
+  if(!todo.length) return toast('ebben a listában minden résznek van már szövege',5000);
+  if(!confirm('Előfelismerés — '+(cimke||'lista')+': '+todo.length+
+    ' szöveg nélküli rész, egymás után, angol szövegre. A kész részeket kihagyja.\n\n'+
+    'Képernyőzár alatt és hallgatás közben is fut (értesítés jelzi). A fordítás '+
+    'most NEM készül el — az akkor jön, amikor az epizódot hallgatod. Indulhat?')) return;
   QSTOP=false;
   let fg=false;
   if(MAPPA.fgOn){
@@ -7370,6 +7370,16 @@ async function sheetQueue(lid){
     ]);
   }
   const items=[];
+  /* v91: ELŐFELISMERÉS — a lista lapjának legfelső sora. A lista szöveg
+     nélküli részeit dolgozza fel sorban (a kész részeket kihagyja), a Groq-os
+     angol felismerést előre elvégzi; háttérben, képernyőzár alatt és másik
+     rész hallgatása közben is fut. */
+  if(MAPPA){
+    const varo=l.items.map(id=>byId[id]).filter(r=>r&&!(r.sen||[]).length&&r.saf);
+    if(varo.length) items.push({t:'előfelismerés háttérben: '+varo.length+
+      ' szöveg nélküli rész (a kész '+(l.items.length-varo.length)+'-t kihagyja)',
+      pri:1,fn:()=>{ closeSheet(); runQueue(varo,l.name) }});
+  }
   l.items.forEach((id,i)=>{
     const r=byId[id];
     if(!r){ items.push({t:(i+1)+'. (törölt felvétel — kivétel)',
@@ -8199,8 +8209,6 @@ async function sheetProcess(){
     (REC.sen&&REC.sen.length)?{t:'felismerés nulláról — a régi leirat törlése '+
       'és tiszta újrakezdés ('+REC.sen.length+' mondat megy a kukába)',
       fn:()=>goZero()}:null,
-    MAPPA?{t:'sorozat-előfelismerés: minden szöveg nélküli rész a könyvtárból '+
-      '— képernyőzár alatt is fut',fn:()=>runQueue()}:null,
     /* Második átfutás: a `done`-t figyelmen kívül hagyja, és csak HOZZÁTESZ. A
        kérésszámot kiírjuk, mert a Groq ingyenes szintje napi 120 kérés. */
     {t:'második átfutás: a teljes felvétel (~'+passCalls([[0,dur]])+' kérés)',
