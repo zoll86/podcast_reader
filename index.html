@@ -1082,7 +1082,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v91';
+const APP_VER='v92';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -4809,7 +4809,7 @@ let QSTOP=false;
 async function runQueue(recsIn,cimke){
   if(JOB.on){ toast('már fut egy feldolgozás'); return }
   if(!MAPPA){ toast('az előfelismeréshez a mappás alkalmazás (APK) kell'); return }
-  const todo=(recsIn||[]).filter(r=>r&&!(r.sen||[]).length&&r.saf);
+  const todo=(recsIn||[]).filter(r=>r&&!(r.sen||[]).length);
   if(!todo.length) return toast('ebben a listában minden résznek van már szövege',5000);
   if(!confirm('Előfelismerés — '+(cimke||'lista')+': '+todo.length+
     ' szöveg nélküli rész, egymás után, angol szövegre. A kész részeket kihagyja.\n\n'+
@@ -7375,7 +7375,9 @@ async function sheetQueue(lid){
      angol felismerést előre elvégzi; háttérben, képernyőzár alatt és másik
      rész hallgatása közben is fut. */
   if(MAPPA){
-    const varo=l.items.map(id=>byId[id]).filter(r=>r&&!(r.sen||[]).length&&r.saf);
+    /* v92: a saf feltétel törölve — a mappa-hivatkozást a folderFind a
+       megnyitáskor pótolja, előre nem kell megkövetelni */
+    const varo=l.items.map(id=>byId[id]).filter(r=>r&&!(r.sen||[]).length);
     if(varo.length) items.push({t:'előfelismerés háttérben: '+varo.length+
       ' szöveg nélküli rész (a kész '+(l.items.length-varo.length)+'-t kihagyja)',
       pri:1,fn:()=>{ closeSheet(); runQueue(varo,l.name) }});
