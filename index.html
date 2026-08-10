@@ -1097,7 +1097,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v93';
+const APP_VER='v94';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -8248,6 +8248,11 @@ async function sheetProcess(){
     (REC.sen&&REC.sen.length)?{t:'felismerés nulláról — a régi leirat törlése '+
       'és tiszta újrakezdés ('+REC.sen.length+' mondat megy a kukába)',
       fn:()=>goZero()}:null,
+    /* v94: törlés újrafelismerés NÉLKÜL — ha csak ki akarod dobni a szöveget,
+       kvóta és kérés nem fogy */
+    (REC.sen&&REC.sen.length)?{t:'a leirat törlése — felismerés nélkül '+
+      '('+REC.sen.length+' mondat megy a kukába, új felismerés NEM indul)',
+      fn:()=>goWipe()}:null,
     /* Második átfutás: a `done`-t figyelmen kívül hagyja, és csak HOZZÁTESZ. A
        kérésszámot kiírjuk, mert a Groq ingyenes szintje napi 120 kérés. */
     {t:'második átfutás: a teljes felvétel (~'+passCalls([[0,dur]])+' kérés)',
@@ -8281,6 +8286,15 @@ async function sheetProcess(){
     catch(e){ return toast('a hang szerkezete nem olvasható: '+e.message,5000) }
     if(!MED) return toast('a hang nem elérhető');
     runFix(REC,MED);
+  }
+  async function goWipe(){
+    if(!confirm('A leirat ('+REC.sen.length+' mondat) VÉGLEG törlődik.\n\n'+
+      'Új felismerés NEM indul — a hangfájlhoz nem nyúlunk. Mehet?')) return;
+    REC.sen=[]; REC.done=[];
+    await save(REC);
+    renderKara(true);
+    log('a leirat törölve (felismerés nélkül)');
+    toast('a leirat törölve — felismerés nem indult',4000);
   }
   async function goZero(){
     if(!confirm('A régi leirat ('+REC.sen.length+' mondat) VÉGLEG törlődik, és a '+
