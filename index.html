@@ -56,6 +56,7 @@
   --shadow:0 -18px 44px rgba(0,0,0,.55);
   /* karaoke tipográfia: az EN/HU arány φ ≈ 1,618 */
   --kfs:1.35rem; --kff:'Literata',Georgia,serif;
+  --sat:env(safe-area-inset-top,0px);
 }
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 html,body{margin:0;height:100%}
@@ -846,8 +847,18 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
       <label class="lbl">motor</label>
       <div class="seg" id="segTr">
         <button data-k="free">ingyenes</button>
+        <button data-k="deepl">DeepL</button>
         <button data-k="claude">Claude</button>
         <button data-k="oai">egyéb API</button>
+      </div>
+      <div id="trDl" class="hid">
+        <label class="lbl">DeepL kulcs</label>
+        <input type="password" id="dlKey" placeholder="xxxx…:fx (ingyenes) vagy fizetős kulcs"
+          autocomplete="off">
+        <div class="note">Csak az alkalmazásban (APK) működik — a böngésző CORS-a
+          a DeepL-t nem engedi. A „:fx" végű kulcs az ingyenes végpontra megy
+          (500&nbsp;000 karakter/hó). Szópárak és tanuló mód hozzá nincs (ahhoz
+          LLM-fordító kell), a fordítás minősége viszont kiváló.</div>
       </div>
       <div id="trClaude" class="hid">
         <label class="lbl">Claude kulcs</label>
@@ -1071,7 +1082,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v88';
+const APP_VER='v90';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -1128,7 +1139,7 @@ addEventListener('unhandledrejection',e=>{
 /* beállítások egyetlen objektumban, hogy egy helyen legyen mentve */
 var CFG=Object.assign({
   asr:'groq', asrKey:'', asrUrl:'', asrModel:'', chunkMin:5, words:1, pcm:1, vad:1, slice:'norm', hint:1,
-  tr:'free', clKey:'', clModel:'haiku', oaiUrl:'https://api.moonshot.ai/v1', oaiKey:'', oaiModel:'kimi-k2.6',
+  tr:'free', dlKey:'', clKey:'', clModel:'haiku', oaiUrl:'https://api.moonshot.ai/v1', oaiKey:'', oaiModel:'kimi-k2.6',
   kfs:1.35, font:'lit', huMode:'split', rate:1, keepAudio:1, trMode:'all', follow:0,
   immSec:5, immTip:0, pairs:0, learn:0, weave:1, wDens:1, paged:1, shelf:1,
   feeds:[], queue:[],
@@ -2622,7 +2633,10 @@ async function trBatch(lines){
   const todo=lines.filter((l,i)=>need[i]);
   if(todo.length){
     let got=null;
-    if(CFG.tr!=='free'){
+    if(CFG.tr==='deepl'){
+      try{ got=await dlLines(todo) }
+      catch(e){ log('fordító (DeepL):',e); return lines.map(l=>cache[l]||'') }
+    }else if(CFG.tr!=='free'){
       /* v52: a fordítás MINDIG a tiszta SYS_TR-en fut — a szópárok külön
          menetben készülnek (fillPairs), a kész magyarhoz horgonyozva */
       try{ got=await llmLinesSafe(todo) }
@@ -2649,14 +2663,54 @@ async function trBatch(lines){
    olvasol. A `trBatch` a gyorstárból ad választ, tehát „még egyszer" önmagában
    semmit nem érne; itt a gyorstárat SZÁNDÉKOSAN kihagyjuk, és a motort a hívó
    választja meg, nem a beállítás. Egy hívás = egy mondat, mert ez kézi művelet. */
-const ENGN={free:'ingyenes (Google)',claude:'Claude',oai:'egyéb API'};
+/* ======== v89: DeepL ========
+   A DeepL API-t a böngésző CORS-a eddig kizárta. Az APK-ban viszont ott a
+   Capacitor natív HTTP-je (CapacitorHttp), amire a CORS nem vonatkozik —
+   tehát az alkalmazásban a DeepL teljes értékű fordítómotor. A kulcs vége
+   dönti el a végpontot: a ":fx" végű kulcs az ingyenes api-free.deepl.com,
+   a többi a fizetős api.deepl.com. Szópárak és írásjelezés hozzá nincs
+   (ahhoz LLM kell) — tiszta, gyors mondatfordítás van. */
+const dlHttp=()=>(window.Capacitor&&window.Capacitor.Plugins&&
+                  window.Capacitor.Plugins.CapacitorHttp)||null;
+async function dlLines(lines){
+  const CH=dlHttp();
+  if(!CH) throw new Error('a DeepL csak az alkalmazásban (APK) megy — a böngésző CORS-a tiltja');
+  if(!CFG.dlKey) throw new Error('nincs megadva a DeepL kulcs (⚙ Beállítások)');
+  const base=/:fx$/.test(CFG.dlKey.trim())?'https://api-free.deepl.com':'https://api.deepl.com';
+  const out=[];
+  for(let i=0;i<lines.length;i+=45){
+    const part=lines.slice(i,i+45);
+    const r=await CH.request({url:base+'/v2/translate',method:'POST',
+      headers:{'Authorization':'DeepL-Auth-Key '+CFG.dlKey.trim(),
+               'Content-Type':'application/json'},
+      data:{text:part,source_lang:'EN',target_lang:'HU'}});
+    if(r.status===456) throw new Error('a DeepL havi karakterkeret elfogyott');
+    if(r.status===403) throw new Error('a DeepL kulcs nem érvényes');
+    if(r.status>=400) throw new Error('DeepL '+r.status+': '+
+      String(typeof r.data==='string'?r.data:JSON.stringify(r.data)).slice(0,120));
+    const d=(typeof r.data==='string')?JSON.parse(r.data):r.data;
+    for(const t of ((d&&d.translations)||[])) out.push(String(t.text||'').trim());
+    spend.calls++; saveSpend();
+    if(i+45<lines.length) await sleep(400);
+  }
+  if(out.length!==lines.length)
+    throw new Error('a DeepL '+out.length+'/'+lines.length+' fordítást adott');
+  return out;
+}
+const ENGN={free:'ingyenes (Google)',deepl:'DeepL',claude:'Claude',oai:'egyéb API'};
 function engReady(e){
   if(e==='free') return true;
+  if(e==='deepl') return !!(CFG.dlKey&&dlHttp());
   if(e==='claude') return !!CFG.clKey;
   if(e==='oai') return !!(CFG.oaiKey&&CFG.oaiUrl!==undefined);
   return false;
 }
 async function trOne(line,eng,wantPairs){
+  if(eng==='deepl'){
+    const hu=(await dlLines([line]))[0]||'';
+    if(!hu) throw new Error('a DeepL nem adott választ');
+    return {hu:hu};
+  }
   if(eng==='free'){
     let hu='';
     try{ hu=(await gtxLines([line]))[0]||'' }catch(e){}
@@ -2743,7 +2797,7 @@ function sheetRetr(gi){
   if(u.hu) items.push({note:'most: '+(u.hu.length>220?u.hu.slice(0,220)+'…':u.hu)+
     (cur.tre?'   ['+ENGN[cur.tre]+']':'')});
   items.push({head:'újrafordítás'});
-  for(const e of ['free','claude','oai']){
+  for(const e of ['free','deepl','claude','oai']){
     const nev=ENGN[e]+(e===CFG.tr?' (beállított)':'');
     if(!engReady(e)){ items.push({t:nev+' — nincs kulcs',fn:()=>show('vSet')}); continue }
     items.push({t:nev,pri:e===CFG.tr?1:0,fn:()=>retrUnit(gi,e)});
@@ -4039,7 +4093,7 @@ async function backupLoad(txt){
     let ujl=0, ujle=0;
     if(fej&&fej.cfg){
       const be=fej.cfg;
-      ['asrKey','clKey','oaiKey','ttsKey','asr','asrUrl','asrModel','tr','clModel','words','pairs',
+      ['asrKey','dlKey','clKey','oaiKey','ttsKey','asr','asrUrl','asrModel','tr','clModel','words','pairs',
        'kfs','font','huMode','rate','trMode','immSec','learn'].forEach(k=>{
         if(be[k]!=null&&(CFG[k]==null||CFG[k]===''||k.endsWith('Key'))) CFG[k]=be[k];
       });
@@ -4738,6 +4792,66 @@ async function runFix(rec,M){
   }
   await runCross(rec,M);
   if(!JOB.stop) toast('ellenőrzés és javítás kész — a napló mutatja, mi került elő',7000);
+}
+/* ======== v90: SOROZAT-ELŐFELISMERÉS ========
+   A kérés: egy egész podcast-sorozat felismerése a háttérben, képernyőzár
+   alatt, akár hallgatás KÖZBEN — angol szövegre, előre dolgozva (a Groq
+   ingyenes szintjén a kvóta nem szempont, az ütemező kivárja). A fordítás
+   szándékosan NEM készül: az akkor jön, kis kortyokban, amikor az epizódot
+   tényleg hallgatod — token csak arra megy el, amit meghallgatsz.
+   A képernyőzár alatti futást a natív előtér-szolgáltatás adja (MAPPA.fgOn:
+   állandó értesítés + részleges ébrenlét-zár); böngészőben, ahol ez nincs,
+   a sor addig fut, amíg a lap nyitva van. */
+let QSTOP=false;
+async function runQueue(){
+  if(JOB.on){ toast('már fut egy feldolgozás'); return }
+  if(!MAPPA){ toast('a sorozat-előfelismeréshez a mappás alkalmazás (APK) kell'); return }
+  let all=[];
+  try{ all=await txtAll() }catch(e){ return toast('a könyvtár nem olvasható') }
+  const todo=all.filter(r=>!(r.sen||[]).length&&r.saf)
+    .sort((a,b)=>String(a.name||'').localeCompare(String(b.name||''),'hu'));
+  if(!todo.length) return toast('nincs szöveg nélküli felvétel a könyvtárban — '+
+    'a mappából egyszer megnyitott részek kerülnek ide',6000);
+  if(!confirm('Előfelismerés: '+todo.length+' rész, egymás után, angol szövegre.\n\n'+
+    'Képernyőzár alatt is fut (értesítés jelzi, amíg dolgozik). A fordítás most '+
+    'NEM készül el — az akkor jön, amikor az epizódot hallgatod. Indulhat?')) return;
+  QSTOP=false;
+  let fg=false;
+  if(MAPPA.fgOn){
+    try{ await MAPPA.fgOn({title:'előfelismerés: '+todo.length+' rész'}); fg=true;
+      log('ébrentartás be — a felismerés képernyőzár alatt is fut'); }
+    catch(e){ log('ébrentartás nem indult ('+String(e&&(e.message||e)).slice(0,60)+
+      ') — régi APK? A sor csak nyitott képernyőnél fut biztosan.'); }
+  }
+  log('sorozat-előfelismerés indul: '+todo.length+' rész');
+  let kesz=0;
+  try{
+    for(let k=0;k<todo.length;k++){
+      if(QSTOP||JOB.stop) break;
+      const rec=todo[k];
+      log('előfelismerés '+(k+1)+'/'+todo.length+': '+String(rec.name||'').slice(0,60));
+      let M=null;
+      try{
+        const f=await folderFind(rec);
+        if(!f) throw new Error('a hangfájl nincs meg a mappában');
+        M=await openMedia(safFile(f),()=>{});
+        if(!(rec.dur>1)&&M.dur>1){ rec.dur=M.dur; await save(rec) }
+      }catch(e){
+        log('előfelismerés — kihagyva ('+String(rec.name||'').slice(0,40)+'): '+
+            String(e&&(e.message||e)).slice(0,80));
+        continue;
+      }
+      await runJob(rec,M,0,rec.dur||M.dur||0);
+      if(JOB.stop){ QSTOP=true; break }
+      kesz++;
+    }
+  }finally{
+    if(fg&&MAPPA.fgOff){ try{ await MAPPA.fgOff({}) }catch(e){} }
+  }
+  log('sorozat-előfelismerés vége: '+kesz+'/'+todo.length+' rész kész'+
+      (QSTOP?' (megállítva)':''));
+  toast('előfelismerés: '+kesz+' rész kész'+(QSTOP?' — megállítva':''),7000);
+  drawLib();
 }
 async function runJob(rec,M,from,to,opts){
   opts=opts||{};
@@ -5627,8 +5741,9 @@ function layoutSplit(){
   if(!on){ root.style.removeProperty('--huH');
     if(wrap){ wrap.style.bottom=''; wrap.style.top='' }
     const h0=$('huWrap'); if(h0){ h0.style.height=''; h0.style.bottom='' } return }
-  /* elrejtett kezelőknél a helyük is felszabadul — ezért a magasságuk nulla */
-  const hdr=IMM?0:((document.querySelector('header')||{}).offsetHeight||64);
+  /* elrejtett kezelőknél a helyük is felszabadul — de felül a biztonsági
+     sáv (állapotsor) megmarad, különben az első sor fele takarásba kerül */
+  const hdr=IMM?immTop():((document.querySelector('header')||{}).offsetHeight||64);
   const plH=IMM?0:(($('pl')&&$('pl').offsetHeight)||150);
   let inset=12;
   try{ inset=Math.round(parseFloat(getComputedStyle($('dock')).bottom))||12 }catch(e){}
@@ -6019,7 +6134,7 @@ function ytLayout(){
            document.body.classList.contains('playing')&&
            !document.body.classList.contains('ytmin');
   if(!on){ box.style.display=''; if(bar) bar.style.top=''; return 0 }
-  const hdr=IMM?0:((document.querySelector('header')||{}).offsetHeight||64);
+  const hdr=IMM?immTop():((document.querySelector('header')||{}).offsetHeight||64);
   const w=Math.min(box.offsetWidth||360,window.innerWidth||360);
   let h=Math.round(w*9/16);
   h=Math.min(h,Math.round((window.innerHeight||640)*0.42));
@@ -6064,6 +6179,15 @@ function learnSet(on){
    harmad koppintására visszajönnek. A zónás vezérlés KIZÁRÓLAG elrejtett állapotban
    él — amíg a kezelők látszanak, a buborékra koppintás marad a régi (odaugrás). */
 let IMM=false, immTimer=0;
+/* v89: elrejtett fejlécnél a sáv a KÉPERNYŐ tetejéig ért, és az első sor fele
+   az állapotsor alá csúszott. A biztonsági sáv (env safe-area-inset-top) vagy
+   legalább 26 px levegő marad felül. */
+function immTop(){
+  let s=0;
+  try{ s=Math.round(parseFloat(getComputedStyle(document.documentElement)
+    .getPropertyValue('--sat')))||0 }catch(e){}
+  return Math.max(s,26);
+}
 function immSet(on){
   on=!!on;
   if(on===IMM) return;
@@ -6088,6 +6212,12 @@ function zonesShow(){
    esemény görgetés után nem keletkezik, ezért külön mozgásfigyelés nem kell. */
 document.addEventListener('click',e=>{
   if(!IMM||!document.body.classList.contains('playing')) return;
+  /* v89: a kért folyamat — közép = megáll, majd a pöcök = újrafordít, a
+     kezelők visszahozása nélkül. Eddig a zónakezelő szünetben is elnyelt
+     MINDEN koppintást (a 'playing' a lejátszónézetet jelzi, nem a tényleges
+     lejátszást), ezért a pöcök elérhetetlen volt. Szünetben az újrafordító
+     gomb koppintása átmegy. */
+  if(A.paused&&e.target.closest&&e.target.closest('.rtr')) return;
   e.stopPropagation(); e.preventDefault();
   const W=innerWidth||360, H=innerHeight||640;
   const x=e.clientX==null?W/2:e.clientX, y=e.clientY==null?H/2:e.clientY;
@@ -8069,6 +8199,8 @@ async function sheetProcess(){
     (REC.sen&&REC.sen.length)?{t:'felismerés nulláról — a régi leirat törlése '+
       'és tiszta újrakezdés ('+REC.sen.length+' mondat megy a kukába)',
       fn:()=>goZero()}:null,
+    MAPPA?{t:'sorozat-előfelismerés: minden szöveg nélküli rész a könyvtárból '+
+      '— képernyőzár alatt is fut',fn:()=>runQueue()}:null,
     /* Második átfutás: a `done`-t figyelmen kívül hagyja, és csak HOZZÁTESZ. A
        kérésszámot kiírjuk, mert a Groq ingyenes szintje napi 120 kérés. */
     {t:'második átfutás: a teljes felvétel (~'+passCalls([[0,dur]])+' kérés)',
@@ -8563,15 +8695,19 @@ function drawSet(){
     CFG.hint=+k; saveCfg(); drawSet() });
   segFill($('segWords'),[[1,'szó szerinti követés'],[0,'csak mondat']],CFG.words?1:0,k=>{
     CFG.words=k; saveCfg(); drawSet() });
-  segFill($('segTr'),[['free','ingyenes'],['claude','Claude'],['oai','egyéb API']],CFG.tr,k=>{
-    CFG.tr=k; saveCfg(); drawSet() });
+  segFill($('segTr'),[['free','ingyenes'],['deepl','DeepL'],['claude','Claude'],
+    ['oai','egyéb API']],CFG.tr,k=>{ CFG.tr=k; saveCfg(); drawSet() });
   $('trClaude').classList.toggle('hid',CFG.tr!=='claude');
   $('trOai').classList.toggle('hid',CFG.tr!=='oai');
+  $('trDl').classList.toggle('hid',CFG.tr!=='deepl');
+  $('dlKey').value=CFG.dlKey||'';
   $('clKey').value=CFG.clKey; $('oaiUrl').value=CFG.oaiUrl; $('oaiKey').value=CFG.oaiKey;
   $('oaiModel').value=CFG.oaiModel;
   segFill($('segModel'),Object.keys(MODELS).map(k=>[k,MODELS[k][1]]),CFG.clModel,k=>{
     CFG.clModel=k; saveCfg(); drawSet() });
-  $('trNote').textContent=CFG.tr==='free'
+  $('trNote').textContent=CFG.tr==='deepl'
+    ? 'A DeepL a mondatokat 45-ös kötegekben fordítja, kizárólag az alkalmazásból (natív hálózat). Az ingyenes kulcs havi 500 000 karaktert ad — egy 20 perces epizód nagyjából 15-20 ezer karakter.'
+    : CFG.tr==='free'
     ? 'Az ingyenes motor kulcs nélkül fordít; a mondatok a Google fordítójához mennek ki (közvetlenül vagy a Lingva proxyn át), nyilvános adatbázisba nem kerülnek. Saját, bizalmas felvételhez a Claude-ot ajánljuk.'
     : 'Az LLM tízes kötegekben fordít, a szomszédos mondatok szövegkörnyezetével; az API-ra küldött tartalomból nem tanul modell, és hiba esetén NINCS csendes átváltás az ingyenes motorra. Egy tízórás könyv Haikuval nagyjából 300–600 forint.';
   $('kFs').value=CFG.kfs; $('vFs').textContent=Math.round(CFG.kfs*1.618*16)+'px';
@@ -8606,7 +8742,7 @@ function drawSet(){
 }
 const bindTxt=(id,key)=>{ $(id).addEventListener('change',()=>{ CFG[key]=$(id).value.trim(); saveCfg() }) };
 bindTxt('asrKey','asrKey'); bindTxt('asrUrl','asrUrl'); bindTxt('asrModel','asrModel');
-bindTxt('clKey','clKey'); bindTxt('oaiUrl','oaiUrl'); bindTxt('oaiKey','oaiKey'); bindTxt('oaiModel','oaiModel');
+bindTxt('dlKey','dlKey'); bindTxt('clKey','clKey'); bindTxt('oaiUrl','oaiUrl'); bindTxt('oaiKey','oaiKey'); bindTxt('oaiModel','oaiModel');
 $('chunkMin').oninput=()=>{ CFG.chunkMin=+$('chunkMin').value; $('vChunk').textContent=CFG.chunkMin+' perc'; saveCfg() };
 $('kFs').oninput=()=>{ CFG.kfs=+$('kFs').value; saveCfg(); applyLook();
   $('vFs').textContent=Math.round(CFG.kfs*1.618*16)+'px' };
