@@ -1,1 +1,15 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android" />
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- v90: előtér-szolgáltatás a háttér-előfelismeréshez.
+         A jogok és a szolgáltatás a manifest-összefésüléssel kerülnek az
+         app manifestjébe — a fő projekthez nem kell nyúlni. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <application>
+        <service
+            android:name="hu.zoll86.mappa.MappaMunka"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+    </application>
+</manifest>
