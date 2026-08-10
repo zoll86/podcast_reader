@@ -608,6 +608,35 @@ public class MappaPlugin extends Plugin {
         }
     }
 
+    /* ---------- v90: előtér-szolgáltatás + ébrentartás ----------
+       A JS oldal hívja a sorozat-előfelismerés elején (fgOn) és végén (fgOff).
+       Amíg fut, a rendszer nem altatja el a folyamatot — a képernyőzár alatt
+       is megy a felismerés. */
+    @PluginMethod
+    public void fgOn(PluginCall call) {
+        try {
+            Intent i = new Intent(getContext(), MappaMunka.class);
+            i.putExtra("cim", call.getString("title", "feldolgozás fut"));
+            if (android.os.Build.VERSION.SDK_INT >= 26)
+                getContext().startForegroundService(i);
+            else
+                getContext().startService(i);
+            call.resolve();
+        } catch (Exception e) {
+            call.reject("nem indul az ébrentartás: " + e.getMessage());
+        }
+    }
+
+    @PluginMethod
+    public void fgOff(PluginCall call) {
+        try {
+            getContext().stopService(new Intent(getContext(), MappaMunka.class));
+            call.resolve();
+        } catch (Exception e) {
+            call.reject(e.getMessage());
+        }
+    }
+
     private String szepNev(Uri tree) {
         try {
             String id = DocumentsContract.getTreeDocumentId(tree);
