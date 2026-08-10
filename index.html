@@ -621,6 +621,19 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
   transition:opacity .2s,transform .25s var(--spring)}
 #toast.show{opacity:1;transform:translateX(-50%)}
 .hid{display:none !important}
+/* v93: a futó felismerés jelzője a fejlécben. Sárga, lüktető pötty +
+   százalék; koppintásra a folyamat-panel visszajön. Így a panel nyugodtan
+   becsukható — az állapot akkor is látszik. */
+#jobDot{display:flex;align-items:center;gap:6px;background:none;border:1px solid
+  rgba(232,182,76,.4);border-radius:999px;padding:4px 10px;color:var(--gold);
+  font-family:var(--mono);font-size:11px;cursor:pointer}
+#jobDot i{width:8px;height:8px;border-radius:50%;background:var(--gold);
+  animation:jobPulse 1.2s ease-in-out infinite}
+@keyframes jobPulse{0%,100%{opacity:1}50%{opacity:.25}}
+#jobDot.wait i{animation-duration:2.4s}
+/* v93: az elrejtés gomb futás közben is él — a régi folyamok mindenütt
+   eldugták (hid), ezt itt, egy helyen oldjuk fel, a folyamok átírása nélkül */
+#prog #progHide.hid{display:inline-block !important}
 </style>
 </head>
 <body>
@@ -629,6 +642,8 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
   <div class="brand">Kétnyelvű hallgató<small>HANGOSKÖNYV · EN → HU</small></div>
   <div id="hTitle"><b></b><span></span></div>
   <div class="hspace"></div>
+  <button id="jobDot" class="hid" title="felismerés fut — koppints a részletekért">
+    <i></i><span>0%</span></button>
   <button class="btn sm" id="bLib">könyvtár</button>
   <button class="btn sm" id="bSet">⚙</button>
 </header>
@@ -1082,7 +1097,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v92';
+const APP_VER='v93';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -2272,6 +2287,9 @@ function asrPaceFeed(r,ok){
       if(!asrPaceSaid){ asrPaceSaid=1;
         log('ütemezés: 429 jött — mostantól '+asrGapMs/1000+
             ' s szünet a kérések közt, sikerekkel fokozatosan gyorsul'); }
+      /* v93: a beragadt százalék magyarázata a panelon és a pöttyön */
+      if(JOB.on) progSet(null,null,
+        'a felismerő kvótára vár (429) — magától folytatódik, ahogy a keret enged');
     }
   }catch(e){}
 }
@@ -3003,13 +3021,32 @@ const bankStat=()=>{
 /* ============ [6] futószalag ============ */
 const JOB={on:false,stop:false,id:null};
 function progShow(on){ $('prog').classList.toggle('on',!!on) }
+let JOBPCT=0;
 function progSet(pct,title,msg,stopLabel){
-  $('progP').textContent=Math.round(pct)+'%';
-  $('progB').style.width=Math.max(2,pct)+'%';
+  if(pct!=null){
+    JOBPCT=pct;
+    $('progP').textContent=Math.round(pct)+'%';
+    $('progB').style.width=Math.max(2,pct)+'%';
+  }
   if(title) $('progT').textContent=title;
   if(msg!=null) $('progM').textContent=msg;
   if(stopLabel) $('progStop').textContent=stopLabel;
+  jobDotDraw(msg);
 }
+/* v93: a fejléc-pötty a JOB állapotát tükrözi. Kvóta-várakozásnál lassabban
+   lüktet és „vár" felirat van a százalék helyett — így a beragadtnak tűnő
+   szám is elmagyarázza magát. */
+function jobDotDraw(msg){
+  const d=$('jobDot'); if(!d) return;
+  d.classList.toggle('hid',!JOB.on);
+  if(!JOB.on) return;
+  const varakozik=typeof msg==='string'&&/kvót|429|vár/.test(msg);
+  d.classList.toggle('wait',varakozik);
+  d.querySelector('span').textContent=varakozik
+    ? Math.round(JOBPCT)+'% · vár'
+    : Math.round(JOBPCT)+'%';
+}
+setInterval(()=>jobDotDraw(),1500);
 /* a feldolgozott szakaszok egyesítése, hogy folytatható legyen */
 function mergeDone(done,a,b){
   const out=[...done,[a,b]].sort((x,y)=>x[0]-y[0]); const res=[];
@@ -8278,6 +8315,7 @@ $('progStop').onclick=async()=>{
   runJob(REC,MED,0,REC.dur||1e9);
 };
 $('progHide').onclick=()=>progShow(false);
+$('jobDot').onclick=()=>progShow(true);
 
 /* Újrafordítás: a meglévő magyar mondatok cserélése a MOST beállított motorral.
    A gyorstárból is töröljük a kulcsokat, különben a régi (pl. Google-) fordítás
