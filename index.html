@@ -1097,7 +1097,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v96';
+const APP_VER='v97';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -8488,13 +8488,20 @@ const subNorm=s=>String(s||'').toLowerCase()
   .replace(/[^a-z0-9áéíóöőúüű]+/g,' ').trim();
 async function subsSync(quiet){
   if(!MAPPA||!MAPPA.subs){
-    if(!quiet) toast('ehhez az alkalmazás új változata (APK) kell — az tudja a mappából a feliratokat listázni',6000);
+    log('feliratmappa: ehhez az alkalmazás új változata (APK) kell — a mostani nem tudja a mappából listázni a feliratokat');
+    if(!quiet) toast('ehhez az alkalmazás új változata (APK) kell',6000);
     return;
   }
   let subs=[];
   try{ subs=((await MAPPA.subs({}))||{}).files||[] }
-  catch(e){ if(!quiet) toast('a mappa nem olvasható'); return }
-  if(!subs.length){ if(!quiet) toast('a mappában nincs feliratfájl (.srt / .vtt)',5000); return }
+  catch(e){ log('feliratmappa: a mappa nem olvasható — '+String(e&&(e.message||e)).slice(0,80));
+    if(!quiet) toast('a mappa nem olvasható'); return }
+  if(!subs.length){
+    log('feliratmappa: a kijelölt mappában nincs feliratfájl (.srt / .vtt) — '+
+        'ha máshol vannak, jelöld ki a szülőmappát, vagy másold őket ide');
+    if(!quiet) toast('a mappában nincs feliratfájl (.srt / .vtt)',5000);
+    return;
+  }
   let all=[];
   try{ all=await txtAll() }catch(e){ return }
   const byN={};
@@ -8532,8 +8539,7 @@ async function subsSync(quiet){
     }
   }
   if(uj||csere) drawLib();
-  if(uj||csere||!quiet)
-    log('feliratmappa: '+subs.length+' feliratfájl · '+uj+' új · '+csere+' frissítve'+
+  log('feliratmappa: '+subs.length+' feliratfájl · '+uj+' új · '+csere+' frissítve'+
         (arva?' · '+arva+' felirathoz nincs (egyértelmű) rész a könyvtárban'+
           (arvak.length?' (pl. '+arvak.join(' | ')+')':''):''));
   if(!quiet) toast((uj||csere)?('feliratok: '+uj+' új, '+csere+' frissítve'):'nincs új felirat a mappában',5000);
