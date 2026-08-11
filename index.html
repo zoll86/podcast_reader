@@ -1097,7 +1097,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v98';
+const APP_VER='v99';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -7506,6 +7506,17 @@ async function sheetQueue(lid){
       ' szöveg nélküli rész (a kész '+(l.items.length-varo.length)+'-t kihagyja)',
       pri:1,fn:()=>{ closeSheet(); runQueue(varo,l.name) }});
   }
+  /* v99: a törölt (már nem létező) bejegyzések tömeges kivétele — egyesével
+     koppintgatni 50 darabnál büntetés volt */
+  (function(){
+    const holtak=l.items.filter(id=>!byId[id]);
+    if(holtak.length>1) items.push({t:'az összes törölt felvétel kivétele a '+
+      'listából ('+holtak.length+' db) — a valódiak maradnak',pri:1,
+      fn:()=>{ holtak.forEach(id=>listRemove(id)); drawLib();
+        toast(holtak.length+' törölt bejegyzés kivéve');
+        const l2=listById(l.id);
+        if(l2&&l2.items.length) sheetQueue(l.id); else closeSheet(); }});
+  })();
   l.items.forEach((id,i)=>{
     const r=byId[id];
     if(!r){ items.push({t:(i+1)+'. (törölt felvétel — kivétel)',
@@ -7515,8 +7526,12 @@ async function sheetQueue(lid){
     const most=REC&&REC.id===id;
     const hol=(r.pos>5&&r.dur&&r.pos<r.dur-8)?' · '+fmtT(r.pos):
       ((r.dur&&r.pos>=r.dur-8)?' · kész':'');
+    /* v99: ✓HU = kész magyar fordítás (a mondatok ≥95%-ának van magyarja) —
+       kintről látszik, mi hallgatható fordítással */
+    const sn=r.sen||[];
+    const ford=(sn.length&&sn.filter(s=>s.hu).length/sn.length>=0.95)?' ✓HU':'';
     items.push({art:coverUrl(r.id,r.cover),
-      t:(most?'▶ ':'')+(i+1)+'. '+r.name+hol,pri:most?1:0,
+      t:(most?'▶ ':'')+(i+1)+'. '+r.name+ford+hol,pri:most?1:0,
       fn:async()=>{ closeSheet(); await openRec(r); try{ await A.play() }catch(e){} },
       x:{t:'✕',title:'kivétel a listából',fn:()=>{
         listRemove(id); drawLib();
