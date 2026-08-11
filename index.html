@@ -1097,7 +1097,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v97';
+const APP_VER='v98';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -6592,6 +6592,8 @@ async function folderScan(csendben){
     log('mappa:',FOLDER.length,'hangfájl');
     /* v95: a feliratmappa átvizsgálása indításkor, csendben */
     setTimeout(()=>{ subsSync(true).catch(()=>{}) },1500);
+    /* v98: a hiányzó borítók pótlása indításkor, csendben */
+    setTimeout(()=>{ coverSweep(true).catch(()=>{}) },4000);
     /* v69: az almappákból magától listát épít (csak a meglévő felvételekből) */
     folderLists(true).catch(e=>log('almappa-lista:',e));
   }catch(e){ log('mappa-olvasás:',e);
@@ -8275,6 +8277,8 @@ $('pMore').onclick=()=>{
     {t:'szöveg betöltése (SRT / kétnyelvű TSV)',fn:()=>askImport(REC)},
     MAPPA?{t:'feliratmappa átvizsgálása — minden részhez, név szerint',
       fn:()=>subsSync(false)}:null,
+    MAPPA?{t:'borítók begyűjtése a fájlokból — minden borító nélküli rész',
+      fn:()=>coverSweep(false)}:null,
     {t:'szöveg beillesztése vágólapról',fn:()=>askPaste(REC)},
     {head:'fájl'},
     {t:'borító beállítása képből',fn:()=>askCover(REC)},
@@ -8482,6 +8486,43 @@ async function fillMissing(){
      cserélhető, mint eddig: felismerés-menü → szöveg betöltése).
    A felirat lehet kétnyelvű (1. sor angol, 2. sor magyar) — akkor fordítás
    sem kell hozzá. Indításkor magától lefut; menüből kézzel is indítható. */
+/* ======== v98: BORÍTÓ-BEGYŰJTÉS ========
+   A borító a fájl ID3-fejlécében van; a javított kinyerő megnyitáskor
+   megtalálja — de a könyvtár már bent lévő részeit senki nem nyitja meg
+   újra 105-ösével. Ez a menet a borító nélküli részek fájljának elejét
+   olvassa be a mappából, és pótolja a képet. */
+async function coverSweep(quiet){
+  if(!MAPPA){ if(!quiet) toast('ez a mappás alkalmazásban (APK) megy'); return }
+  let all=[];
+  try{ all=await txtAll() }catch(e){ return }
+  const nincs=all.filter(r=>!(r.cover&&r.cover.b&&r.cover.b.length));
+  if(!nincs.length){
+    if(!quiet) toast('minden résznek van már borítója',4000);
+    return;
+  }
+  let kep=0,nezve=0,frissul=false;
+  for(const rec of nincs){
+    let f=null;
+    try{ f=await folderFind(rec) }catch(e){}
+    if(!f) continue;
+    nezve++;
+    try{
+      const c=await id3Cover(safFile(f));
+      if(c&&c.b&&c.b.length){
+        rec.cover=c;
+        await save(rec);
+        kep++;
+        if(REC&&REC.id===rec.id) frissul=true;
+        if(kep<=3) log('borító pótolva: '+String(rec.name||'').slice(0,50)+
+                       ' ('+c.mime+', '+fmtMB(c.b.length)+')');
+      }
+    }catch(e){}
+  }
+  log('borító-begyűjtés: '+nezve+' fájl megnézve · '+kep+' kép pótolva'+
+      (nincs.length-nezve?' · '+(nincs.length-nezve)+' fájl nincs meg a mappában':''));
+  if(kep){ drawLib(); if(frissul) renderKara(false); }
+  if(!quiet) toast('borítók: '+kep+' kép pótolva',5000);
+}
 const subNorm=s=>String(s||'').toLowerCase()
   .replace(/\.(srt|vtt|tsv|txt)$/,'')
   .replace(/\(\d+\)\s*$/,'')
