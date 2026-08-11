@@ -621,8 +621,9 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
   transition:opacity .2s,transform .25s var(--spring)}
 #toast.show{opacity:1;transform:translateX(-50%)}
 .hid{display:none !important}
-/* v100: a kész magyar fordítás jelvénye a polcon */
-.pill.hu{background:rgba(126,217,87,.14);color:#7ed957;border:1px solid rgba(126,217,87,.35)}
+/* v101: a kész magyar fordítás jelzése — sima zöld szó, keret nélkül, hogy
+   a csempe egysoros mono metasora ne csússzon ki */
+.huok{color:#7ed957;font-weight:600}
 /* v93: a futó felismerés jelzője a fejlécben. Sárga, lüktető pötty +
    százalék; koppintásra a folyamat-panel visszajön. Így a panel nyugodtan
    becsukható — az állapot akkor is látszik. */
@@ -1099,7 +1100,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v100';
+const APP_VER='v101';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -8010,7 +8011,7 @@ function bkCard(r,part){
   const sn=r.sen||[];
   const huKesz=sn.length&&sn.filter(s=>s.hu).length/sn.length>=0.95;
   el.querySelector('span').innerHTML=esc(fmtT(r.dur))+(pos?' · '+pos+'%':'')+
-    (huKesz?' · <span class="pill hu">✓HU</span>':'')+
+    (huKesz?' · <span class="huok">HU</span>':'')+
     (pct>0&&pct<99?' · <span class="pill part">'+pct+'%</span>'
       :(pct<=0&&nincsSzoveg?' · szöveg ✗':''))+mark;
   el.onclick=()=>openRec(r);
@@ -8304,6 +8305,7 @@ $('pMore').onclick=()=>{
       fn:()=>subsSync(false)}:null,
     MAPPA?{t:'borítók begyűjtése a fájlokból — minden borító nélküli rész',
       fn:()=>coverSweep(false)}:null,
+    MAPPA?{t:'borító-vizsgálat (3 fájl, részletes napló)',fn:()=>coverProbe()}:null,
     {t:'szöveg beillesztése vágólapról',fn:()=>askPaste(REC)},
     {head:'fájl'},
     {t:'borító beállítása képből',fn:()=>askCover(REC)},
@@ -8516,6 +8518,45 @@ async function fillMissing(){
    megtalálja — de a könyvtár már bent lévő részeit senki nem nyitja meg
    újra 105-ösével. Ez a menet a borító nélküli részek fájljának elejét
    olvassa be a mappából, és pótolja a képet. */
+/* v101: célzott vizsgálat — három fájl, minden lépésről napló, hexdumppal.
+   A teljes begyűjtés naplója 150 fájlnál kifutott, így nem látszott a lényeg. */
+async function coverProbe(){
+  if(!MAPPA) return toast('ez a mappás alkalmazásban (APK) megy');
+  let all=[];
+  try{ all=await txtAll() }catch(e){ return }
+  const jelolt=all.filter(r=>!(r.cover&&r.cover.b&&r.cover.b.length)).slice(0,3);
+  if(!jelolt.length) return toast('minden résznek van borítója');
+  const hex=u=>Array.from(u).map(x=>x.toString(16).padStart(2,'0')).join(' ');
+  const txt=u=>Array.from(u).map(x=>(x>=32&&x<127)?String.fromCharCode(x):'.').join('');
+  for(const rec of jelolt){
+    log('— borító-vizsgálat: '+String(rec.name||'').slice(0,44));
+    let f=null;
+    try{ f=await folderFind(rec) }catch(e){}
+    if(!f){ log('   a fájl nincs meg a mappában'); continue }
+    const sf=safFile(f);
+    log('   fájl: '+fmtMB(sf.size)+' · saf='+(sf.saf?'igen':'nem')+
+        ' · url='+(sf.url?'van':'nincs'));
+    try{
+      const fej=await readSlice(sf,0,10);
+      log('   0–10: '+hex(fej)+'  ['+txt(fej)+']');
+      if(fej.length>=10&&fej[0]===0x49&&fej[1]===0x44&&fej[2]===0x33){
+        const sz=((fej[6]&127)<<21|(fej[7]&127)<<14|(fej[8]&127)<<7|(fej[9]&127));
+        log('   ID3v2.'+fej[3]+' · jelzőbájt='+fej[5]+' · tag='+sz+' bájt');
+        const t=await readSlice(sf,10,10+Math.min(sz,64));
+        log('   10–74 ('+t.length+' bájt): '+hex(t.slice(0,24))+'  ['+txt(t.slice(0,40))+']');
+        const teljes=await readSlice(sf,10,10+Math.min(sz,8*1024*1024));
+        log('   a tag beolvasva: '+teljes.length+' bájt (kért: '+Math.min(sz,8*1024*1024)+')');
+        let jpeg=-1;
+        for(let i=0;i<teljes.length-3;i++)
+          if(teljes[i]===0xff&&teljes[i+1]===0xd8&&teljes[i+2]===0xff){ jpeg=i; break }
+        log('   JPEG-kezdet a tagban: '+(jpeg<0?'nincs':('a '+jpeg+'. bájtnál')));
+      }
+    }catch(e){ log('   olvasási hiba: '+String(e&&(e.message||e)).slice(0,90)) }
+    const c=await id3Cover(sf).catch(e=>null);
+    log('   kinyerő eredménye: '+(c&&c.b?(c.mime+' '+fmtMB(c.b.length)):'nincs kép'));
+  }
+  toast('a vizsgálat kész — a napló alján látszik (⚙ → Hibanapló)',6000);
+}
 async function coverSweep(quiet){
   if(!MAPPA){ if(!quiet) toast('ez a mappás alkalmazásban (APK) megy'); return }
   let all=[];
