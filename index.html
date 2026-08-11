@@ -1097,7 +1097,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v94';
+const APP_VER='v95';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -1814,39 +1814,125 @@ async function cutWav(M,t0,t1){
           t0:a/M.fmt.byteRate,t1:b/M.fmt.byteRate};
 }
 
-/* borító ID3v2 APIC keretből (mp3 és nyers AAC elejéről) */
+/* borító ID3v2 APIC keretből (mp3 és nyers AAC elejéről).
+   v95: ÚJRAÍRVA. A régi változat minden fájlra „nincs beágyazott kép"-et
+   mondott, mert a való életben az ID3 sokszínűbb, mint a szabvány mintapéldája:
+   - kiterjesztett fejléc (a régi kód az első „keretként" olvasta → azonnal
+     kilépett);
+   - unsync jelzés (FF 00 → FF visszaalakítás nélkül a méretek hazudnak);
+   - v2.4-be v2.3-as (nem synchsafe) keretméretet író kódolók;
+   - 3 MB-nál nagyobb tagek (fejezetképes podcastok!) — a plafon most 8 MB;
+   - ID3v2.2 (3 betűs 'PIC' keretek);
+   - és ha a szerkezet olvashatatlan, nyers képkeresés a tag területén.
+   Diagnosztika a naplóba, hogy kudarcnál lássuk, melyik lépcsőn bukott. */
 async function id3Cover(file){
   try{
     const h=await readSlice(file,0,Math.min(file.size,10));
     if(h.length<10||!(h[0]===0x49&&h[1]===0x44&&h[2]===0x33)) return null;
-    const ver=h[3];
+    const ver=h[3], flags=h[5];
     const size=((h[6]&127)<<21|(h[7]&127)<<14|(h[8]&127)<<7|(h[9]&127));
-    const buf=await readSlice(file,10,10+Math.min(size,3*1024*1024));
-    const fsz=o=> ver>=4
-      ? ((buf[o]&127)<<21|(buf[o+1]&127)<<14|(buf[o+2]&127)<<7|(buf[o+3]&127))
-      : u32(buf,o);
-    let o=0;
-    while(o+10<buf.length){
-      const id=String.fromCharCode(buf[o],buf[o+1],buf[o+2],buf[o+3]);
-      if(!/^[A-Z0-9]{4}$/.test(id)) break;
-      const n=fsz(o+4); if(n<=0||o+10+n>buf.length) break;
-      if(id==='APIC'){
-        let p=o+10; const end=o+10+n;
-        const enc=buf[p]; p++;
-        let mime=''; while(p<end&&buf[p]!==0){ mime+=String.fromCharCode(buf[p]); p++ } p++;
-        p++;                                   /* képtípus */
-        if(enc===1||enc===2){ while(p+1<end&&!(buf[p]===0&&buf[p+1]===0)) p+=2; p+=2 }
-        else{ while(p<end&&buf[p]!==0) p++; p++ }
-        const b=buf.slice(p,end);
-        /* az APIC keret tarthat a kep helyett CIMET is (mime „-->"), es a csonka
-           adatbol is blob lenne — a magic byte dont, nem a fejlec */
-        if(mime==='-->'||b.length<=100) return null;
-        const kind=imgKind(b);
-        return kind?{mime:kind,b}:null;
-      }
-      o+=10+n;
+    let buf=await readSlice(file,10,10+Math.min(size,8*1024*1024));
+    /* teljes-tag unsync visszaalakítása (v2.3-nál a tagre vonatkozik) */
+    if(flags&0x80){
+      const t=new Uint8Array(buf.length); let w=0;
+      for(let i=0;i<buf.length;i++){ t[w++]=buf[i];
+        if(buf[i]===0xff&&buf[i+1]===0x00) i++; }
+      buf=t.slice(0,w);
     }
-  }catch(e){}
+    let o=0;
+    /* kiterjesztett fejléc átlépése */
+    if(flags&0x40){
+      if(ver>=4){ o+=((buf[0]&127)<<21|(buf[1]&127)<<14|(buf[2]&127)<<7|(buf[3]&127)) }
+      else{ o+=4+u32(buf,0) }
+      if(o<0||o>buf.length-10) o=0;
+    }
+    const synch=q=>((buf[q]&127)<<21|(buf[q+1]&127)<<14|(buf[q+2]&127)<<7|(buf[q+3]&127));
+    /* egy pozíció „minősége": 2 = érvényes keretazonosító, 1 = tiszta kitöltés
+       (nullák a következő 4 kB-ban vagy a tag végéig), 0 = adat közepe.
+       A méret-értelmezések közül a jobb minőségű folytatásút választjuk. */
+    const rang=q=>{
+      if(q>=buf.length) return 1;                       /* pont a tag vége */
+      if(q+4<=buf.length){
+        let s=String.fromCharCode(buf[q],buf[q+1],buf[q+2],buf[q+3]);
+        if(/^[A-Z0-9]{4}$/.test(s)) return 2;
+      }
+      if(buf[q]===0){
+        const end=Math.min(buf.length,q+4096);
+        for(let k=q;k<end;k++) if(buf[k]!==0) return 0;
+        return 1;
+      }
+      return 0;
+    };
+    const apicOut=(p,end)=>{
+      const enc=buf[p]; p++;
+      let mime=''; while(p<end&&buf[p]!==0){ mime+=String.fromCharCode(buf[p]); p++ } p++;
+      p++;                                              /* képtípus */
+      if(enc===1||enc===2){ while(p+1<end&&!(buf[p]===0&&buf[p+1]===0)) p+=2; p+=2 }
+      else{ while(p<end&&buf[p]!==0) p++; p++ }
+      const b=buf.slice(p,end);
+      if(mime==='-->'||b.length<=100) return null;      /* URL-es vagy csonka keret */
+      const kind=imgKind(b);
+      return kind?{mime:kind,b}:null;
+    };
+    let keret=0;
+    if(ver===2){                                        /* v2.2: 3 betűs, 3 bájtos */
+      while(o+6<buf.length&&buf[o]!==0){
+        const id=String.fromCharCode(buf[o],buf[o+1],buf[o+2]);
+        if(!/^[A-Z0-9]{3}$/.test(id)) break;
+        const n=(buf[o+3]<<16)|(buf[o+4]<<8)|buf[o+5];
+        if(n<=0||o+6+n>buf.length) break;
+        keret++;
+        if(id==='PIC'){
+          /* v2.2-ben a mime helyett 3 betűs formátumkód áll */
+          let p=o+6; const end=o+6+n; const enc=buf[p]; p+=4;
+          if(enc===1){ while(p+1<end&&!(buf[p]===0&&buf[p+1]===0)) p+=2; p+=2 }
+          else{ while(p<end&&buf[p]!==0) p++; p++ }
+          const b=buf.slice(p,end), kind=imgKind(b);
+          if(kind&&b.length>100) return {mime:kind,b};
+        }
+        o+=6+n;
+      }
+    }else{
+      while(o+10<buf.length&&buf[o]!==0){
+        const id=String.fromCharCode(buf[o],buf[o+1],buf[o+2],buf[o+3]);
+        if(!/^[A-Z0-9]{4}$/.test(id)) break;
+        /* v2.4-ben synchsafe a szabály, de sok kódoló v2.3-asan ír — azt az
+           értelmezést vesszük, amelyik után érvényes keret (vagy kitöltés) áll */
+        let n;
+        if(ver>=4){
+          const a=synch(o+4), b=u32(buf,o+4);
+          const ra=(a>0&&o+10+a<=buf.length)?rang(o+10+a):0;
+          const rb=(b>0&&o+10+b<=buf.length)?rang(o+10+b):0;
+          n=(rb>ra)?b:a;                    /* egyenlőnél a szabványos (synchsafe) */
+        }else n=u32(buf,o+4);
+        if(n<=0||o+10+n>buf.length) break;
+        keret++;
+        const fl2=buf[o+9];
+        if(id==='APIC'){
+          let p=o+10, end=o+10+n;
+          if(ver>=4&&(fl2&0x01)) p+=4;                  /* adat-hossz jelző */
+          const got=apicOut(p,end);
+          if(got) return got;
+        }
+        o+=10+n;
+      }
+    }
+    /* tartalék: nyers képkeresés a tag területén (szerkezettől függetlenül) */
+    for(let i=0;i<buf.length-8;i++){
+      if(buf[i]===0xff&&buf[i+1]===0xd8&&buf[i+2]===0xff){           /* JPEG */
+        let j=buf.length-2;
+        while(j>i&&!(buf[j]===0xff&&buf[j+1]===0xd9)) j--;
+        if(j>i+100) return {mime:'image/jpeg',b:buf.slice(i,j+2)};
+      }
+      if(buf[i]===0x89&&buf[i+1]===0x50&&buf[i+2]===0x4e&&buf[i+3]===0x47){ /* PNG */
+        for(let j=i+8;j<buf.length-8;j++){
+          if(buf[j]===0x49&&buf[j+1]===0x45&&buf[j+2]===0x4e&&buf[j+3]===0x44)
+            return {mime:'image/png',b:buf.slice(i,j+8)};
+        }
+      }
+    }
+    log('borító: ID3v2.'+ver+' tag ('+fmtMB(size)+', '+keret+' keret átnézve) — APIC/kép nincs benne');
+  }catch(e){ log('borító-olvasás hiba: '+String(e&&(e.message||e)).slice(0,80)) }
   return null;
 }
 
@@ -6193,9 +6279,9 @@ function learnSet(on){
     if(REC&&REC.kind==='yt'&&REC.ytid){
       toast('videónál nincs tanuló mód: a képet nem takarjuk el'); return;
     }
-    if(CFG.tr==='free'||CFG.tr==='deepl'){
-      toast('a tanuló módhoz LLM-fordító kell (Claude vagy egyéb API) — a beállításokban'); return;
-    }
+    /* v95: a régi kapu (LLM-fordító nélkül nincs tanuló mód) kivéve. A tanuló
+       mód pihenő módként importált felirattal és bármely fordítóval is megy —
+       a beszövéshez való szópárak híján egyszerűen tiszta magyar szöveg fut. */
     /* v58: a szópár-gyűjtés MINDEN útvonalon szünetel — a felismerés és a
        fordítás tökéletesítése az egyetlen cél. A tanuló mód a MÁR meglévő
        párokkal megy; új párok most nem készülnek. */
@@ -6249,12 +6335,9 @@ function zonesShow(){
    esemény görgetés után nem keletkezik, ezért külön mozgásfigyelés nem kell. */
 document.addEventListener('click',e=>{
   if(!IMM||!document.body.classList.contains('playing')) return;
-  /* v89: a kért folyamat — közép = megáll, majd a pöcök = újrafordít, a
-     kezelők visszahozása nélkül. Eddig a zónakezelő szünetben is elnyelt
-     MINDEN koppintást (a 'playing' a lejátszónézetet jelzi, nem a tényleges
-     lejátszást), ezért a pöcök elérhetetlen volt. Szünetben az újrafordító
-     gomb koppintása átmegy. */
-  if(A.paused&&e.target.closest&&e.target.closest('.rtr')) return;
+  /* v95: a v89-es „szünetben a pöcök átjut" viselkedés kivéve — a gyakorlatban
+     zavaró volt. Elrejtett kezelőknél a pöcökhöz előbb vissza kell hozni a
+     kezelőket (felső harmad koppintás). */
   e.stopPropagation(); e.preventDefault();
   const W=innerWidth||360, H=innerHeight||640;
   const x=e.clientX==null?W/2:e.clientX, y=e.clientY==null?H/2:e.clientY;
@@ -6507,6 +6590,8 @@ async function folderScan(csendben){
     await folderDraw();
     if(!csendben) toast(FOLDER.length+' hangfájl a mappában',3500);
     log('mappa:',FOLDER.length,'hangfájl');
+    /* v95: a feliratmappa átvizsgálása indításkor, csendben */
+    setTimeout(()=>{ subsSync(true).catch(()=>{}) },1500);
     /* v69: az almappákból magától listát épít (csak a meglévő felvételekből) */
     folderLists(true).catch(e=>log('almappa-lista:',e));
   }catch(e){ log('mappa-olvasás:',e);
@@ -8188,6 +8273,8 @@ $('pMore').onclick=()=>{
     {t:'szöveg rendbetétele',fn:()=>textDoctor(REC)},
     {t:'újrafordítás a beállított motorral',fn:()=>reTranslate(REC)},
     {t:'szöveg betöltése (SRT / kétnyelvű TSV)',fn:()=>askImport(REC)},
+    MAPPA?{t:'feliratmappa átvizsgálása — minden részhez, név szerint',
+      fn:()=>subsSync(false)}:null,
     {t:'szöveg beillesztése vágólapról',fn:()=>askPaste(REC)},
     {head:'fájl'},
     {t:'borító beállítása képből',fn:()=>askCover(REC)},
@@ -8381,6 +8468,75 @@ async function fillMissing(){
         :'a fordítások megvannak');
   $('progHide').classList.remove('hid');
   $('progStop').textContent='rendben';
+}
+/* ======== v95: FELIRATMAPPA-SZINKRON ========
+   A podcast-mappában (bárhol, akár almappában) talált .srt/.vtt fájlokat a
+   nevük alapján a könyvtár részeihez illeszti, és betölti. Az illesztés
+   toleráns: kisbetűsítés, írásjelek ki, a letöltők „(1)" toldaléka ki.
+   Szabályok:
+   - amelyik résznek NINCS szövege → a felirat bekerül;
+   - amelyiknek feliratból van szövege, és a fájl azóta módosult → csere;
+   - amelyiknek FELISMERT szövege van → NEM bántjuk (kézi betöltéssel
+     cserélhető, mint eddig: felismerés-menü → szöveg betöltése).
+   A felirat lehet kétnyelvű (1. sor angol, 2. sor magyar) — akkor fordítás
+   sem kell hozzá. Indításkor magától lefut; menüből kézzel is indítható. */
+const subNorm=s=>String(s||'').toLowerCase()
+  .replace(/\.(srt|vtt|tsv|txt)$/,'')
+  .replace(/\(\d+\)\s*$/,'')
+  .replace(/[^a-z0-9áéíóöőúüű]+/g,' ').trim();
+async function subsSync(quiet){
+  if(!MAPPA||!MAPPA.subs){
+    if(!quiet) toast('ehhez az alkalmazás új változata (APK) kell — az tudja a mappából a feliratokat listázni',6000);
+    return;
+  }
+  let subs=[];
+  try{ subs=((await MAPPA.subs({}))||{}).files||[] }
+  catch(e){ if(!quiet) toast('a mappa nem olvasható'); return }
+  if(!subs.length){ if(!quiet) toast('a mappában nincs feliratfájl (.srt / .vtt)',5000); return }
+  let all=[];
+  try{ all=await txtAll() }catch(e){ return }
+  const byN={};
+  for(const r of all){ const k=subNorm(r.name); if(k) (byN[k]=byN[k]||[]).push(r) }
+  let uj=0,csere=0,vedett=0,arva=0; const vedettek=[];
+  for(const f of subs){
+    const k=subNorm(f.name); if(!k) continue;
+    let recs=byN[k]||[];
+    if(!recs.length){
+      const lel=all.filter(r=>{ const rn=subNorm(r.name);
+        return rn&&rn.length>5&&(rn.indexOf(k)>=0||k.indexOf(rn)>=0) });
+      if(lel.length===1) recs=lel; else { arva++; continue }
+    }
+    for(const rec of recs){
+      const volt=(rec.sen||[]).length;
+      if(volt&&!rec.subMt){                    /* felismert szöveg — védett */
+        vedett++; if(vedettek.length<3) vedettek.push(rec.name);
+        continue;
+      }
+      if(rec.subMt&&+(f.mtime||0)<=+rec.subMt) continue;   /* nincs újabb */
+      let raw='';
+      try{ raw=((await MAPPA.readText({uri:f.uri}))||{}).text||'' }
+      catch(e){ log('felirat-olvasás hiba ('+f.name+'): '+String(e&&(e.message||e)).slice(0,60)); continue }
+      const sen=parseSrt(raw);
+      if(!sen.length){ log('felirat: '+f.name+' — nem találtam mondatokat'); continue }
+      rec.sen=sen;
+      rec.done=mergeDone([],0,sen[sen.length-1].b);
+      if(!(rec.dur>1)) rec.dur=sen[sen.length-1].b;
+      rec.subMt=+(f.mtime||Date.now()); rec.subName=f.name;
+      await save(rec);
+      volt?csere++:uj++;
+      log('felirat betöltve: '+f.name+' → '+rec.name+' ('+sen.length+' mondat'+
+          (volt?', a régi lecserélve':'')+
+          (sen.some(x=>!x.hu)?', magyar rész hiányzik — hallgatáskor fordul':'')+')');
+      if(REC&&REC.id===rec.id){ CUR=-1; renderKara(false); huBuild(); renderHu(true); drawSeek() }
+    }
+  }
+  if(uj||csere) drawLib();
+  if(uj||csere||vedett||!quiet)
+    log('feliratmappa: '+subs.length+' feliratfájl · '+uj+' új · '+csere+' frissítve'+
+        (vedett?' · '+vedett+' kihagyva (felismert szövege van'+
+          (vedettek.length?': '+vedettek.join(' | '):'')+' — kézi betöltéssel cserélhető)':'')+
+        (arva?' · '+arva+' felirathoz nincs (egyértelmű) rész a könyvtárban':''));
+  if(!quiet) toast((uj||csere)?('feliratok: '+uj+' új, '+csere+' frissítve'):'nincs új felirat a mappában',5000);
 }
 /* --- SRT / kétnyelvű TSV visszatöltése ---
    Amit a program kivitt, azt vissza is tudja hozni: a felismert szöveg így gép-
