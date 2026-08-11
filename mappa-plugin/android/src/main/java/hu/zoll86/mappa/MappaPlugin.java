@@ -198,6 +198,11 @@ public class MappaPlugin extends Plugin {
 
     /** Rekurzív bejárás, legfeljebb 3 szint mélyen (podcast-mappa/műsor/epizód). */
     private void bejar(Uri tree, String docId, JSArray out, String utvonal, int melyseg) {
+        bejarSzuro(tree, docId, out, utvonal, melyseg, false);
+    }
+
+    /** Ugyanaz a bejárás, választható szűrővel: hang (alap) vagy felirat. */
+    private void bejarSzuro(Uri tree, String docId, JSArray out, String utvonal, int melyseg, boolean feliratMod) {
         if (melyseg > 3 || out.length() > 3000) return;
         Uri kids = DocumentsContract.buildChildDocumentsUriUsingTree(tree, docId);
         Cursor c = null;
@@ -218,8 +223,8 @@ public class MappaPlugin extends Plugin {
                 long mod = c.getLong(4);
                 boolean mappa = DocumentsContract.Document.MIME_TYPE_DIR.equals(mime);
                 if (mappa) {
-                    bejar(tree, id, out, utvonal.isEmpty() ? nev : (utvonal + "/" + nev), melyseg + 1);
-                } else if (hang(nev, mime)) {
+                    bejarSzuro(tree, id, out, utvonal.isEmpty() ? nev : (utvonal + "/" + nev), melyseg + 1, feliratMod);
+                } else if (feliratMod ? felirat(nev) : hang(nev, mime)) {
                     JSObject f = new JSObject();
                     f.put("uri", DocumentsContract.buildDocumentUriUsingTree(tree, id).toString());
                     f.put("name", nev);
@@ -234,6 +239,31 @@ public class MappaPlugin extends Plugin {
         } finally {
             if (c != null) try { c.close(); } catch (Exception ignored) { }
         }
+    }
+
+    /* ---------- v95: FELIRATFÁJLOK a mappából ----------
+       A `list` szándékosan csak hangot ad (a könyvtár-nézetek arra épülnek);
+       a feliratok külön metódust kapnak, ugyanazzal a bejárással. */
+    @PluginMethod
+    public void subs(PluginCall call) {
+        String s = getContext().getSharedPreferences(PREF, 0).getString(KEY_TREE, null);
+        if (s == null) { call.reject("nincs kijelölt mappa"); return; }
+        JSArray out = new JSArray();
+        try {
+            Uri tree = Uri.parse(s);
+            bejarSzuro(tree, DocumentsContract.getTreeDocumentId(tree), out, "", 0, true);
+        } catch (Exception e) {
+            call.reject("a mappa nem olvasható: " + e.getMessage());
+            return;
+        }
+        JSObject r = new JSObject();
+        r.put("files", out);
+        call.resolve(r);
+    }
+
+    private boolean felirat(String nev) {
+        String n = (nev == null) ? "" : nev.toLowerCase();
+        return n.endsWith(".srt") || n.endsWith(".vtt") || n.endsWith(".tsv");
     }
 
     private boolean hang(String nev, String mime) {
