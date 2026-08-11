@@ -621,6 +621,8 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
   transition:opacity .2s,transform .25s var(--spring)}
 #toast.show{opacity:1;transform:translateX(-50%)}
 .hid{display:none !important}
+/* v100: a kész magyar fordítás jelvénye a polcon */
+.pill.hu{background:rgba(126,217,87,.14);color:#7ed957;border:1px solid rgba(126,217,87,.35)}
 /* v93: a futó felismerés jelzője a fejlécben. Sárga, lüktető pötty +
    százalék; koppintásra a folyamat-panel visszajön. Így a panel nyugodtan
    becsukható — az állapot akkor is látszik. */
@@ -1097,7 +1099,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v99';
+const APP_VER='v100';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -5241,7 +5243,10 @@ function strip(rec){
   return {id:rec.id,name:rec.name,size:rec.size,dur:rec.dur,kind:rec.kind,added:rec.added,
           chaps:rec.chaps||[],done:rec.done,sen:rec.sen,pos:rec.pos||0,words:rec.words||0,
           ver:1,hasAudio:rec.hasAudio?1:0,ach:rec.ach||0,cover:rec.cover||null,
-          heard:rec.heard||[],ytid:rec.ytid||null};
+          heard:rec.heard||[],ytid:rec.ytid||null,
+          /* v100: a felirat-jelölő is menjen a mentésbe — nélküle a
+             feliratmappa-szinkron minden indításnál újratöltött mindent */
+          subMt:rec.subMt||0,subName:rec.subName||''};
 }
 </script>
 <script>
@@ -8000,7 +8005,12 @@ function bkCard(r,part){
   /* v56: a 0% nem hír — jelvény csak akkor, ha tényleg folyamatban van; szöveg
      nélküli felvételnél a hiányt mondjuk ki (a „hang ✗" mintájára) */
   const nincsSzoveg=!(r.sen&&r.sen.length);
+  /* v100: ✓HU a csempén — kész magyar fordítás (a mondatok ≥95%-ának van
+     magyarja). Innen látszik, mi hallgatható most, fordításra várás nélkül. */
+  const sn=r.sen||[];
+  const huKesz=sn.length&&sn.filter(s=>s.hu).length/sn.length>=0.95;
   el.querySelector('span').innerHTML=esc(fmtT(r.dur))+(pos?' · '+pos+'%':'')+
+    (huKesz?' · <span class="pill hu">✓HU</span>':'')+
     (pct>0&&pct<99?' · <span class="pill part">'+pct+'%</span>'
       :(pct<=0&&nincsSzoveg?' · szöveg ✗':''))+mark;
   el.onclick=()=>openRec(r);
@@ -8522,7 +8532,25 @@ async function coverSweep(quiet){
     if(!f) continue;
     nezve++;
     try{
-      const c=await id3Cover(safFile(f));
+      const sf=safFile(f);
+      /* v100: az első 3 fájlról részletes napló — ha a kinyerés elbukik,
+         ebből látszik, hol (elérés, ID3-fejléc, keretek) */
+      if(nezve<=3){
+        try{
+          const fej=await readSlice(sf,0,10);
+          const id3=fej.length>=10&&fej[0]===0x49&&fej[1]===0x44&&fej[2]===0x33;
+          log('borító-vizsgálat '+nezve+': '+String(f.name||'').slice(0,40)+
+              ' · '+fmtMB(sf.size)+(id3
+                ?' · ID3v2.'+fej[3]+' tag '+fmtMB(((fej[6]&127)<<21|(fej[7]&127)<<14|
+                   (fej[8]&127)<<7|(fej[9]&127)))
+                :' · NINCS ID3-fejléc a fájl elején ('+
+                  Array.from(fej.slice(0,4)).map(x=>x.toString(16)).join(' ')+')'));
+        }catch(e){ log('borító-vizsgálat '+nezve+': a fájl eleje nem olvasható — '+
+          String(e&&(e.message||e)).slice(0,70)) }
+      }
+      const c=await id3Cover(sf);
+      if(nezve<=3) log('borító-vizsgálat '+nezve+' eredménye: '+
+        (c&&c.b?('kép '+c.mime+' '+fmtMB(c.b.length)):'nincs kép'));
       if(c&&c.b&&c.b.length){
         rec.cover=c;
         await save(rec);
@@ -8531,7 +8559,8 @@ async function coverSweep(quiet){
         if(kep<=3) log('borító pótolva: '+String(rec.name||'').slice(0,50)+
                        ' ('+c.mime+', '+fmtMB(c.b.length)+')');
       }
-    }catch(e){}
+    }catch(e){ if(nezve<=3) log('borító-vizsgálat '+nezve+' hiba: '+
+      String(e&&(e.message||e)).slice(0,80)) }
   }
   log('borító-begyűjtés: '+nezve+' fájl megnézve · '+kep+' kép pótolva'+
       (nincs.length-nezve?' · '+(nincs.length-nezve)+' fájl nincs meg a mappában':''));
