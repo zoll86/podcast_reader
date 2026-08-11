@@ -1097,7 +1097,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v95';
+const APP_VER='v96';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -8378,6 +8378,7 @@ async function sheetProcess(){
     if(!confirm('A leirat ('+REC.sen.length+' mondat) VÉGLEG törlődik.\n\n'+
       'Új felismerés NEM indul — a hangfájlhoz nem nyúlunk. Mehet?')) return;
     REC.sen=[]; REC.done=[];
+    delete REC.subMt; delete REC.subName;   /* v96: a szinkron visszahozhassa */
     await save(REC);
     renderKara(true);
     log('a leirat törölve (felismerés nélkül)');
@@ -8390,6 +8391,7 @@ async function sheetProcess(){
     catch(e){ return toast('a hang szerkezete nem olvasható: '+e.message,5000) }
     if(!MED) return toast('a hang nem elérhető');
     REC.sen=[]; REC.done=[];
+    delete REC.subMt; delete REC.subName;
     await save(REC);
     renderKara(true);
     log('felismerés nulláról: a régi leirat törölve, tiszta újrakezdés');
@@ -8497,22 +8499,21 @@ async function subsSync(quiet){
   try{ all=await txtAll() }catch(e){ return }
   const byN={};
   for(const r of all){ const k=subNorm(r.name); if(k) (byN[k]=byN[k]||[]).push(r) }
-  let uj=0,csere=0,vedett=0,arva=0; const vedettek=[];
+  let uj=0,csere=0,arva=0; const arvak=[];
   for(const f of subs){
     const k=subNorm(f.name); if(!k) continue;
     let recs=byN[k]||[];
     if(!recs.length){
       const lel=all.filter(r=>{ const rn=subNorm(r.name);
         return rn&&rn.length>5&&(rn.indexOf(k)>=0||k.indexOf(rn)>=0) });
-      if(lel.length===1) recs=lel; else { arva++; continue }
+      if(lel.length===1) recs=lel;
+      else { arva++; if(arvak.length<5) arvak.push(f.name); continue }
     }
     for(const rec of recs){
       const volt=(rec.sen||[]).length;
-      if(volt&&!rec.subMt){                    /* felismert szöveg — védett */
-        vedett++; if(vedettek.length<3) vedettek.push(rec.name);
-        continue;
-      }
-      if(rec.subMt&&+(f.mtime||0)<=+rec.subMt) continue;   /* nincs újabb */
+      /* v96: a felirat a FŐ forrás — a felismert szöveget is lecseréli.
+         Egyetlen kihagyási ok maradt: a fájl nem újabb az utolsó betöltésnél. */
+      if(rec.subMt&&+(f.mtime||0)<=+rec.subMt) continue;
       let raw='';
       try{ raw=((await MAPPA.readText({uri:f.uri}))||{}).text||'' }
       catch(e){ log('felirat-olvasás hiba ('+f.name+'): '+String(e&&(e.message||e)).slice(0,60)); continue }
@@ -8531,11 +8532,10 @@ async function subsSync(quiet){
     }
   }
   if(uj||csere) drawLib();
-  if(uj||csere||vedett||!quiet)
+  if(uj||csere||!quiet)
     log('feliratmappa: '+subs.length+' feliratfájl · '+uj+' új · '+csere+' frissítve'+
-        (vedett?' · '+vedett+' kihagyva (felismert szövege van'+
-          (vedettek.length?': '+vedettek.join(' | '):'')+' — kézi betöltéssel cserélhető)':'')+
-        (arva?' · '+arva+' felirathoz nincs (egyértelmű) rész a könyvtárban':''));
+        (arva?' · '+arva+' felirathoz nincs (egyértelmű) rész a könyvtárban'+
+          (arvak.length?' (pl. '+arvak.join(' | ')+')':''):''));
   if(!quiet) toast((uj||csere)?('feliratok: '+uj+' új, '+csere+' frissítve'):'nincs új felirat a mappában',5000);
 }
 /* --- SRT / kétnyelvű TSV visszatöltése ---
