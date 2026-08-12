@@ -1119,7 +1119,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v103';
+const APP_VER='v104';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -8318,6 +8318,10 @@ $('pMore').onclick=()=>{
     REC&&REC.chaps&&REC.chaps.length&&{t:'fejezetek ('+REC.chaps.length+')',fn:sheetChaps},
     REC&&!inAnyList(REC.id)&&{t:'listába…',fn:()=>sheetAddTo(REC)},
     {t:'lejátszás elölről',fn:()=>{ A.currentTime=0; CUR=-1; tick(); A.play().catch(()=>{}) }},
+    /* v104: a törlés a napi menüben, látható helyen — nem almenük mélyén */
+    (REC&&REC.sen&&REC.sen.length)?{t:'szöveg törlése ('+REC.sen.length+' mondat)',
+      fn:()=>wipeText(REC)}:null,
+    {t:'szöveg betöltése fájlból (SRT / TSV)',fn:()=>askImport(REC)},
     {t:'műhely — szöveg, feliratok, borítók, kivitel',fn:sheetShop},
     {t:'bezárás',fn:closeRec}
   ]);
@@ -8346,6 +8350,24 @@ const SYS_FIX=
  'Return ONLY a JSON array, one object per input sentence: '+
  '{"i": index, "en": English, "hu": Hungarian, "changed": true|false, "why": short Hungarian note '+
  '(max 12 words) about what you corrected, or "" if unchanged}. No prose, no markdown.';
+/* v104: A SZÖVEG TÖRLÉSE — globális, hogy a napi menüből is elérhető legyen.
+   Eddig a felismerés-lap belsejében lakott, és a takarítás után nem vezetett
+   hozzá út. Csak töröl: nem indít felismerést, a hangfájlhoz nem nyúl. */
+async function wipeText(rec){
+  rec=rec||REC;
+  if(!rec||!(rec.sen||[]).length){ toast('ennek a résznek nincs szövege'); return }
+  const n=rec.sen.length;
+  if(!confirm('A '+n+' mondat VÉGLEG törlődik ebből a részből.\n\n'+
+    'Felismerés NEM indul, a hangfájlhoz nem nyúlunk. Utána betölthetsz '+
+    'feliratot, vagy indíthatsz új felismerést. Mehet?')) return;
+  rec.sen=[]; rec.done=[];
+  delete rec.subMt; delete rec.subName;   /* a felirat-szinkron visszahozhassa */
+  await save(rec);
+  if(REC&&REC.id===rec.id){ CUR=-1; renderKara(true); huBuild(); renderHu(true); drawSeek() }
+  drawLib();
+  log('szöveg törölve: '+String(rec.name||'').slice(0,50)+' ('+n+' mondat)');
+  toast('a szöveg törölve ('+n+' mondat) — felismerés nem indult',5000);
+}
 async function senFix(i){
   if(!REC||!REC.sen||!REC.sen[i]) return;
   if(JOB.on||RT){ toast('már fut egy feldolgozás'); return }
@@ -8558,16 +8580,8 @@ async function sheetProcess(){
     if(!MED) return toast('a hang nem elérhető');
     runFix(REC,MED);
   }
-  async function goWipe(){
-    if(!confirm('A leirat ('+REC.sen.length+' mondat) VÉGLEG törlődik.\n\n'+
-      'Új felismerés NEM indul — a hangfájlhoz nem nyúlunk. Mehet?')) return;
-    REC.sen=[]; REC.done=[];
-    delete REC.subMt; delete REC.subName;   /* v96: a szinkron visszahozhassa */
-    await save(REC);
-    renderKara(true);
-    log('a leirat törölve (felismerés nélkül)');
-    toast('a leirat törölve — felismerés nem indult',4000);
-  }
+  /* v104: egy helyen él a törlés — a globális wipeText */
+  async function goWipe(){ closeSheet(); await wipeText(REC) }
   async function goZero(){
     if(!confirm('A régi leirat ('+REC.sen.length+' mondat) VÉGLEG törlődik, és a '+
       'felismerés nulláról indul.\n\nA hangfájlhoz nem nyúlunk. Mehet?')) return;
@@ -8936,8 +8950,24 @@ async function importText(rec,f){
   if(!sen.length){ const y=parseYtTranscript(raw); if(y.length){ sen=y; mibol='YouTube-átirat' } }
   if(!sen.length){ log('betöltés:',f.name,'— nem találtam mondatokat');
     return toast('nem találtam mondatokat ebben a fájlban (SRT, kétnyelvű TSV vagy '+
+  /* v104: HA MÁR VAN SZÖVEG, CSERE — nem összefűzés. A régi viselkedés a
+     mondatokat a meglévők közé szúrta, így egy 400 soros SRT után 800 mondat
+     lett, egymás melletti változatokkal. Aki tényleg hozzáfűzni akar (pl. egy
+     hiányzó szakasz feliratát), az a Mégse után a műhelyben a „szöveg
+     rendbetétele" úton teheti — de az alap a csere. */
       'YouTube-átirat kell)',5500) }
-  const added=mergeSen(rec,sen);
+  let added=0;
+  if((rec.sen||[]).length){
+    if(!confirm('Ennek a résznek már van '+rec.sen.length+' mondata.\n\n'+
+      'A fájl '+sen.length+' mondata LECSERÉLI a mostani szöveget.\n\n'+
+      'Mehet a csere?')){
+      log('betöltés megszakítva (a régi szöveg maradt):',f.name);
+      return toast('a betöltés megszakadt — a régi szöveg maradt',4000);
+    }
+    log('betöltés: a régi '+rec.sen.length+' mondat lecserélve');
+    rec.sen=[]; rec.done=[];
+    added=mergeSen(rec,sen);
+  }else added=mergeSen(rec,sen);
   /* a lefedett szakasz késznek számít, hogy a felismerés ne fusson rá újra;
      a fájl vége utáni rész feldolgozható marad */
   rec.done=mergeDone(rec.done,Math.max(0,sen[0].a-1),sen[sen.length-1].b);
