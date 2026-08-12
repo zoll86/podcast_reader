@@ -621,6 +621,25 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
   transition:opacity .2s,transform .25s var(--spring)}
 #toast.show{opacity:1;transform:translateX(-50%)}
 .hid{display:none !important}
+/* v103: a mondat-javító pöcök. Ugyanaz a logika, mint a magyar oldali
+   újrafordítónál: minden mondatra kikerül, de csak az aktuálison látszik. */
+.sen{position:relative}
+.sen>.fixb{display:none}
+.sen.cur>.fixb{display:flex;position:absolute;top:2px;right:2px;width:30px;height:30px;
+  align-items:center;justify-content:center;border-radius:50%;
+  background:rgba(232,182,76,.10);border:1px solid rgba(232,182,76,.30);
+  color:var(--gold);font-size:15px;line-height:1;cursor:pointer;z-index:3}
+.sen.cur>.fixb:active{background:rgba(232,182,76,.22)}
+/* ======== v102: becsukható beállítás-csoportok ========
+   Nyolc kártya egymás alatt három képernyő görgetés volt; így a keresett
+   dolog egy koppintás. A fejléc marad látható, a tartalom csukódik. */
+#vSet .card>h3.foldH{cursor:pointer;position:relative;padding-right:28px;margin-bottom:0}
+#vSet .card>h3.foldH::after{content:'⌄';position:absolute;right:4px;top:0;
+  font-size:18px;color:var(--gold);transition:transform .2s ease}
+#vSet .card.open>h3.foldH::after{transform:rotate(180deg)}
+#vSet .card>h3.foldH>em{margin-top:2px}
+#vSet .foldBox{display:none;margin-top:var(--sp3)}
+#vSet .card.open .foldBox{display:block}
 /* v101: a kész magyar fordítás jelzése — sima zöld szó, keret nélkül, hogy
    a csempe egysoros mono metasora ne csússzon ki */
 .huok{color:#7ed957;font-weight:600}
@@ -1100,7 +1119,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v101';
+const APP_VER='v103';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -1159,6 +1178,8 @@ var CFG=Object.assign({
   asr:'groq', asrKey:'', asrUrl:'', asrModel:'', chunkMin:5, words:1, pcm:1, vad:1, slice:'norm', hint:1,
   tr:'free', dlKey:'', clKey:'', clModel:'haiku', oaiUrl:'https://api.moonshot.ai/v1', oaiKey:'', oaiModel:'kimi-k2.6',
   kfs:1.35, font:'lit', huMode:'split', rate:1, keepAudio:1, trMode:'all', follow:0,
+  /* v102: a tanuló mód (angol szavak beszövése) kikerült — a program
+     hallgatásra és olvasásra való. A folyamatos magyar nézet marad. */
   immSec:5, immTip:0, pairs:0, learn:0, weave:1, wDens:1, paged:1, shelf:1,
   feeds:[], queue:[],
   proxy:0, proxyUrl:'https://api.allorigins.win/raw?url='
@@ -5347,7 +5368,10 @@ function senHtml(s,i){
     const words=s.en.split(/\s+/);
     en=words.map((w,k)=>'<span class="w" data-t="'+(s.w[Math.min(k,s.w.length-1)]||s.a)+'">'+esc(w)+'</span>').join(' ');
   }else en=esc(s.en);
+  /* v103: javító pöcök az angol buborékon — a CSS csak az aktuális mondaton
+     mutatja, mint a magyar oldali újrafordítót */
   return '<div class="sen" data-i="'+i+'"><div class="en">'+en+'</div>'+
+    '<button class="fixb" title="ez a mondat gyanús — új felismerés és javítás">⟲</button>'+
     '<div class="hu">'+esc(s.hu||'')+'</div></div>';
 }
 /* csak az aktuális környezetet rajzoljuk ki: négyezer mondat DOM-ban akadna */
@@ -6936,6 +6960,14 @@ $('pHu').onclick=()=>{
   toast(HUFULL[CFG.huMode]);
 };
 $('kara').addEventListener('click',e=>{
+  /* v103: a javító pöcök előbb jön, mint a mondatra ugrás */
+  const fb=e.target.closest('.fixb');
+  if(fb){
+    e.stopPropagation();
+    const p=fb.closest('.sen');
+    if(p&&!isNaN(+p.dataset.i)) senFix(+p.dataset.i);
+    return;
+  }
   const el=e.target.closest('.sen'); if(!el||el.classList.contains('gap')) return;
   const i=+el.dataset.i; if(isNaN(i)) return;
   if(CFG.huMode==='hide'&&i===CUR&&!el.classList.contains('rev')){ el.classList.add('rev'); return }
@@ -8268,51 +8300,172 @@ $('sheet').onclick=e=>{ if(e.target.id==='sheet') closeSheet() };
 const isYtRec=()=>!!(REC&&REC.kind==='yt'&&REC.ytid);
 $('pMore').onclick=()=>{
   const gap=REC?nextGap(REC.done,0,REC.dur||1e9):null;
+  /* ======== v102: NAPI MENÜ ========
+     Ez a menü hallgatás közben nyílik ki, ezért csak az van rajta, ami
+     hallgatáskor kell. A szerszámok (kivitelek, javítók, felismerő-változatok,
+     borító- és feliratkezelés) a „műhely" almenübe kerültek: megvannak, de
+     nem kell átgázolni rajtuk, hogy a fejezetekhez érj. */
+  const hiany=!REC||!REC.sen.length;
   sheet(REC?REC.name:'',[
-    /* beágyazott videó hangjához nem férünk hozzá — felismerés helyett a YouTube
-       saját átiratát kell betölteni */
-    isYtRec()&&{t:'YouTube-átirat beillesztése',pri:!REC.sen.length?0:1,
-      fn:()=>askPaste(REC)},
-    isYtRec()&&{t:'átirat betöltése fájlból (txt / SRT)',pri:!REC.sen.length?0:1,
-      fn:()=>askImport(REC)},
-    /* MINDIG ott van, akkor is, ha minden fel van dolgozva: ez a bejárat a második
-       átfutáshoz is. A v43-ban `gap`-hez volt kötve, tehát kész felvételnél eltűnt. */
-    !isYtRec()&&{t:gap?('feldolgozás '+(REC.sen.length?'folytatása':'indítása'))
-                     :'felismerés újra (Whisper)…',pri:1,fn:sheetProcess},
-    /* és egy koppintásos út is, a becsült kérésszámmal — csak HOZZÁTESZ */
-    (!isYtRec()&&REC&&REC.sen.length)?{t:'újra végig Whisperrel (~'+
-      passCalls([[0,REC.dur||0]])+' kérés)',
-      fn:()=>passRange(0,REC.dur||A.duration||0)}:null,
-    !isYtRec()&&{t:(CFG.learn?'✓ ':'')+'tanuló mód'+(CFG.learn?'':' — csak magyar, beszőtt angollal'),
-      pri:!CFG.learn?0:1,fn:()=>learnSet(!CFG.learn)},
-    {head:'hallgatás'},
+    /* EGY szövegkezelő gomb: ha nincs szöveg vagy hiányos, felismerés/folytatás;
+       ha kész, a rendbetétel. A többi út a műhelyben van. */
+    (!isYtRec()&&(hiany||gap))&&{t:(REC&&REC.sen.length)?'feldolgozás folytatása'
+      :'szöveg készítése (felismerés)',pri:1,fn:sheetProcess},
+    isYtRec()&&hiany&&{t:'YouTube-átirat beillesztése',pri:1,fn:()=>askPaste(REC)},
     (()=>{ const l=REC?listOf(REC.id):null;
       return l?{t:l.name+' — ez a '+(l.items.indexOf(REC.id)+1)+'. / '+l.items.length,
         fn:()=>sheetQueue(l.id)}:null })(),
-    REC&&!inAnyList(REC.id)&&{t:'listába…',fn:()=>sheetAddTo(REC)},
     REC&&REC.chaps&&REC.chaps.length&&{t:'fejezetek ('+REC.chaps.length+')',fn:sheetChaps},
+    REC&&!inAnyList(REC.id)&&{t:'listába…',fn:()=>sheetAddTo(REC)},
     {t:'lejátszás elölről',fn:()=>{ A.currentTime=0; CUR=-1; tick(); A.play().catch(()=>{}) }},
-    {t:'bezárás',fn:closeRec},
+    {t:'műhely — szöveg, feliratok, borítók, kivitel',fn:sheetShop},
+    {t:'bezárás',fn:closeRec}
+  ]);
+};
+/* ======== v103: EGY MONDAT JAVÍTÁSA ========
+   Két lépés: friss felismerés a mondat környékéről (a régi hibától
+   független), majd nyelvi modell, amelyik összeveti a kettőt, és CSAK a
+   valóban eltérő helyeken javít — magyarral együtt. */
+const SYS_FIX=
+ 'You repair an English audiobook transcript and its Hungarian translation. '+
+ 'INPUT is JSON: {"suspect": index of the sentence the user flagged, '+
+ '"sentences": [{"i": index, "en": current English, "hu": current Hungarian}], '+
+ '"fresh": a fresh independent transcript of the same audio window}. '+
+ 'The fresh transcript has no sentence numbering and may split sentences differently; '+
+ 'use it as evidence about what was actually said, especially for proper names, numbers, '+
+ 'and quiet or slurred passages. '+
+ 'RULES: (1) If a sentence\'s current English already matches the fresh transcript in meaning '+
+ 'and wording, output it unchanged with "changed": false and do NOT touch its Hungarian. '+
+ '(2) If it differs, decide which reading is more plausible given the surrounding sentences; '+
+ 'if the fresh transcript is better, correct the English, then retranslate ONLY the affected '+
+ 'part of the Hungarian, keeping the existing style, register and sentence structure wherever '+
+ 'the meaning did not change. (3) Never merge, split, reorder or drop sentences: return exactly '+
+ 'the same indices you received, in the same order. (4) Pay closest attention to the flagged '+
+ '"suspect" sentence, but fix any other sentence that is clearly wrong. (5) Hungarian must be '+
+ 'natural and idiomatic. '+
+ 'Return ONLY a JSON array, one object per input sentence: '+
+ '{"i": index, "en": English, "hu": Hungarian, "changed": true|false, "why": short Hungarian note '+
+ '(max 12 words) about what you corrected, or "" if unchanged}. No prose, no markdown.';
+async function senFix(i){
+  if(!REC||!REC.sen||!REC.sen[i]) return;
+  if(JOB.on||RT){ toast('már fut egy feldolgozás'); return }
+  if(!CFG.asrKey){ toast('ehhez felismerő-kulcs kell (⚙ Beállítások → Beszédfelismerés)',6000); return }
+  const eng=engReady('claude')?'claude':(engReady('oai')?'oai':null);
+  if(!eng){ toast('ehhez Claude vagy egyéb API kulcs kell (⚙ Beállítások → Fordítás)',6000); return }
+  try{ await prepMedia() }catch(e){ toast('a hang nem elérhető: '+e.message,5000); return }
+  if(!MED){ toast('a hang nem elérhető'); return }
+  const S=REC.sen, s=S[i];
+  const hossz=MED.dur||REC.dur||0;
+  const a=Math.max(0,(s.a||0)-15);
+  const b=Math.min(hossz||((s.b||s.a)+15),(s.b||((s.a||0)+5))+15);
+  if(!(b>a+1)){ toast('ehhez a mondathoz nincs használható idősáv'); return }
+  /* az ablakba eső mondatok — ezeket adjuk a modellnek környezetként */
+  const idx=[];
+  for(let k=0;k<S.length;k++){
+    const ka=S[k].a||0, kb=S[k].b||ka;
+    if(kb>a+0.2&&ka<b-0.2) idx.push(k);
+  }
+  if(idx.indexOf(i)<0) idx.push(i);
+  RT=true; progShow(true);
+  progSet(5,'mondat javítása','hangszelet előkészítése ('+fmtT(a)+' → '+fmtT(b)+')');
+  let cs=0;
+  try{
+    const piece=await cutSmart(MED,a,b,true);
+    progSet(30,'mondat javítása','friss felismerés a felismerővel');
+    let d=null,hiba=null;
+    for(let att=0;att<3;att++){
+      try{ d=await asrCall(piece.blob,'javit.wav',(piece.t1-piece.t0)||(b-a),'',0,{noPrompt:true}); break }
+      catch(e){
+        hiba=e;
+        if(e.status===401||e.status===403) break;
+        const v=e.retry?Math.min(30,e.retry):(att+1)*4;
+        progSet(30,'mondat javítása','a felismerő vár ('+v+' s)');
+        await sleep(v*1000);
+      }
+    }
+    if(!d) throw hiba||new Error('a felismerő nem válaszolt');
+    const fresh=(((d.segments||[]).map(x=>String(x.text||'').trim()).filter(Boolean).join(' '))
+      ||String(d.text||'')).replace(/\s+/g,' ').trim();
+    if(!fresh) throw new Error('a friss felismerés üres lett');
+    log('mondat-javítás · friss átirat ('+fmtT(a)+'–'+fmtT(b)+'): '+fresh.slice(0,160));
+    progSet(65,'mondat javítása','összevetés és javítás');
+    const user=JSON.stringify({suspect:i,
+      sentences:idx.map(k=>({i:k,en:String(S[k].en||''),hu:String(S[k].hu||'')})),
+      fresh:fresh});
+    const raw=String((eng==='oai'?await oaiCall(SYS_FIX,user,2600)
+                                 :await claudeCall(SYS_FIX,user,2600))||'');
+    let arr=null;
+    try{ arr=JSON.parse(raw.replace(/```json|```/g,'').trim()) }
+    catch(e){
+      const m=raw.match(/\[[\s\S]*\]/);
+      if(m) try{ arr=JSON.parse(m[0]) }catch(e2){}
+    }
+    if(!Array.isArray(arr)) throw new Error('a modell válasza nem értelmezhető');
+    progSet(90,'mondat javítása','csere');
+    for(const o of arr){
+      const k=+o.i;
+      if(!S[k]||idx.indexOf(k)<0) continue;              /* csak amit odaadtunk */
+      const ujEn=String(o.en||'').trim(), ujHu=String(o.hu||'').trim();
+      if(!o.changed) continue;
+      if(!ujEn&&!ujHu) continue;
+      const voltEn=String(S[k].en||''), voltHu=String(S[k].hu||'');
+      if(ujEn===voltEn&&ujHu===voltHu) continue;         /* „changed", de azonos */
+      if(ujEn&&ujEn!==voltEn){
+        S[k].en=ujEn;
+        S[k].w=null;      /* a szó-időbélyegek a régi szöveghez tartoztak */
+      }
+      if(ujHu) S[k].hu=ujHu;
+      cs++;
+      log('mondat-javítás '+(k===i?'(a jelölt) ':'')+'#'+(k+1)+
+          (ujEn&&ujEn!==voltEn?('\n   angol volt: '+voltEn.slice(0,110)+
+                                '\n   angol most: '+ujEn.slice(0,110)):'')+
+          (ujHu&&ujHu!==voltHu?('\n   magyar most: '+ujHu.slice(0,110)):'')+
+          (o.why?('\n   ok: '+String(o.why).slice(0,90)):''));
+    }
+    if(cs){
+      /* v103: a javítás VÉDETT — a feliratmappa-szinkron ne írja vissza a
+         régi fájlból, amit most kijavítottunk */
+      REC.subMt=Date.now();
+      await save(REC);
+      CUR=-1; renderKara(false); huBuild(); renderHu(true); drawSeek(); tick();
+      toast(cs+' mondat javítva — a naplóban az indoklás',6000);
+    }else{
+      log('mondat-javítás: a friss felismerés megegyezett a mostani szöveggel — nem volt mit javítani');
+      toast('a friss felismerés ugyanezt adta — nem volt mit javítani',6000);
+    }
+  }catch(e){
+    log('mondat-javítás hiba:',e);
+    toast('a javítás nem sikerült: '+String(e&&(e.message||e)).slice(0,80),7000);
+  }finally{
+    RT=false; progShow(false);
+  }
+}
+/* ======== v102: MŰHELY ========
+   Minden szerszám egy helyen, szakaszokra bontva. Semmi nem tűnt el a
+   programból — csak egy koppintással messzebb került a napi útvonaltól. */
+function sheetShop(){
+  sheet('műhely',[
     {head:'szöveg'},
-    /* v54: a hat régi javítóeszköz (pótlás, szópárok, rendezés, tisztítás,
-       újraépítés, írásjelezés, szétvágás) EGY gombbá csukódott — a rendbetétel
-       előbb diagnosztizál, aztán jóváhagyással javít. Az alap a v52–v53 óta
-       automatikusan tartja magát, ez a régi felvételeknek kell. */
-    {t:'szöveg rendbetétele',fn:()=>textDoctor(REC)},
+    (REC&&REC.sen&&REC.sen.length&&CUR>=0)?{t:'a mostani mondat javítása '+
+      '(friss felismerés + összevetés)',fn:()=>senFix(CUR)}:null,
+    {t:'szöveg rendbetétele (ellenőrzés és javítás)',fn:()=>textDoctor(REC)},
+    (!isYtRec()&&REC&&REC.sen.length)?{t:'felismerés újra, végig (~'+
+      passCalls([[0,REC.dur||0]])+' kérés)',
+      fn:()=>passRange(0,REC.dur||A.duration||0)}:null,
+    !isYtRec()&&{t:'felismerés részletes beállításokkal…',fn:sheetProcess},
     {t:'újrafordítás a beállított motorral',fn:()=>reTranslate(REC)},
-    {t:'szöveg betöltése (SRT / kétnyelvű TSV)',fn:()=>askImport(REC)},
-    MAPPA?{t:'feliratmappa átvizsgálása — minden részhez, név szerint',
-      fn:()=>subsSync(false)}:null,
-    MAPPA?{t:'borítók begyűjtése a fájlokból — minden borító nélküli rész',
-      fn:()=>coverSweep(false)}:null,
-    MAPPA?{t:'borító-vizsgálat (3 fájl, részletes napló)',fn:()=>coverProbe()}:null,
+    {t:'szöveg betöltése fájlból (SRT / kétnyelvű TSV)',fn:()=>askImport(REC)},
     {t:'szöveg beillesztése vágólapról',fn:()=>askPaste(REC)},
-    {head:'fájl'},
+    {head:'a mappából, minden részhez'},
+    MAPPA?{t:'feliratok behúzása a mappából (név szerint)',fn:()=>subsSync(false)}:null,
+    MAPPA?{t:'borítók begyűjtése a hangfájlokból',fn:()=>coverSweep(false)}:null,
+    MAPPA?{t:'borító-vizsgálat (3 fájl, részletes napló)',fn:()=>coverProbe()}:null,
+    {head:'ez a rész'},
     {t:'borító beállítása képből',fn:()=>askCover(REC)},
     {t:'kivitel: kétnyelvű TSV',fn:()=>exportTsv(REC)},
     {t:'kivitel: SRT feliratfájl',fn:()=>exportSrt(REC)}
   ]);
-};
+}
 function sheetChaps(){
   sheet('fejezetek',REC.chaps.map((c,i)=>({t:(i+1)+'. '+c.name+'  ·  '+fmtT(c.t),
     fn:()=>{ A.currentTime=c.t; CUR=-1; tick() }})));
@@ -9013,6 +9166,36 @@ function segFill(el,items,cur,fn){
     el.appendChild(b);
   });
 }
+/* v102: ha a tanuló mód korábban be volt kapcsolva, kikapcsoljuk — a mód
+   kezelője kikerült a felületről, így bekapcsolva ragadhatna. */
+if(CFG.learn){ CFG.learn=0; saveCfg() }
+/* v102: a beállítás-kártyák becsukása. Futásidőben burkoljuk a h3 utáni
+   tartalmat egy dobozba — így a HTML-hez nem kell nyúlni, és minden későbbi
+   kártya magától megkapja ugyanezt. A nyitás ténye megjegyződik. */
+function setFold(){
+  const box=document.getElementById('vSet');
+  if(!box) return;
+  CFG.fold=CFG.fold||{};
+  box.querySelectorAll(':scope > .card').forEach(c=>{
+    if(c.dataset.fold) return;
+    const h=c.querySelector(':scope > h3');
+    if(!h) return;                              /* fejléc nélküli kártya marad */
+    c.dataset.fold='1';
+    const kulcs=(h.textContent||'').replace(/\s+/g,' ').trim().slice(0,24);
+    const d=document.createElement('div');
+    d.className='foldBox';
+    while(h.nextSibling) d.appendChild(h.nextSibling);
+    c.appendChild(d);
+    h.classList.add('foldH');
+    if(CFG.fold[kulcs]) c.classList.add('open');
+    h.onclick=()=>{
+      const nyit=!c.classList.contains('open');
+      c.classList.toggle('open',nyit);
+      CFG.fold[kulcs]=nyit?1:0; saveCfg();
+      if(nyit) setTimeout(()=>{ try{ c.scrollIntoView({block:'nearest',behavior:'smooth'}) }catch(e){} },210);
+    };
+  });
+}
 function drawSet(){
   /* v76: pontosság-választó (a Groq két Whisper-modellje) */
   {
@@ -9045,6 +9228,7 @@ function drawSet(){
     CFG.hint=+k; saveCfg(); drawSet() });
   segFill($('segWords'),[[1,'szó szerinti követés'],[0,'csak mondat']],CFG.words?1:0,k=>{
     CFG.words=k; saveCfg(); drawSet() });
+  setFold();
   segFill($('segTr'),[['free','ingyenes'],['deepl','DeepL'],['claude','Claude'],
     ['oai','egyéb API']],CFG.tr,k=>{ CFG.tr=k; saveCfg(); drawSet() });
   $('trClaude').classList.toggle('hid',CFG.tr!=='claude');
