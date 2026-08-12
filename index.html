@@ -169,6 +169,8 @@ span.pill{display:inline-block}
 #karaWrap{display:none;position:absolute;inset:var(--hdrH,64px) 0 0 0;
   overflow-y:auto;-webkit-overflow-scrolling:touch}
 body.playing #karaWrap{display:block}
+/* v105: teljes képernyős magyar nézet — az angol sáv nem foglal helyet */
+body.huFull #karaWrap{display:none !important}
 body.playing .view{display:none}
 #kara{
   /* keskeny sáv: a hosszú sorokat nem lehet hallgatás közben követni */
@@ -235,13 +237,13 @@ body.pinhu #huCard.on{display:block}
    nem ugrik mondatonként, hanem olyan tempóban csúszik, amilyen tempóban a
    hozzá tartozó angol töredékek pörögnek (flowScroll). Ujjal bármelyik folyam
    szabadon görgethető; öt másodperc múlva visszaáll az automatikus követés. */
-body.splithu #huCard{display:none}
-body.splithu .sen.cur .hu{display:none}
+body.splithu #huCard,body.huFull #huCard{display:none}
+body.splithu .sen.cur .hu,body.huFull .sen.cur .hu{display:none}
 body.splithu #kara{padding-top:var(--sp3);padding-bottom:92vh}
 #huWrap{position:fixed;left:50%;transform:translateX(-50%);z-index:35;display:none;
   width:min(34rem,94vw);overflow-y:auto;-webkit-overflow-scrolling:touch;
   overscroll-behavior:contain}
-body.playing.splithu #huWrap,body.playing.learn #huWrap{display:block}
+body.playing.splithu #huWrap,body.playing.huFull #huWrap{display:block}
 #huFlow{padding:var(--sp3) var(--sp5) 92vh}
 /* egy magyar buborék = egy TELJES magyar mondat, akkor is, ha felül három-négy
    angol töredék tartozik hozzá (huKey szerinti összevonás) */
@@ -276,26 +278,26 @@ body.playing.splithu #huWrap,body.playing.learn #huWrap{display:block}
    buborek elmozdulna), (2) a keret es a belso margo MINDEN buboreken ott van,
    csak atlatszoan — kulonben a jelolt buborek magasabb lenne, mint amikor meg nem
    o volt az aktualis. */
-body.learn.paged .hs{border:1px solid transparent;border-radius:var(--r3);
+body.huFull.paged .hs{border:1px solid transparent;border-radius:var(--r3);
   padding:var(--sp3) var(--sp4) var(--sp3) var(--sp5);margin-bottom:var(--sp4);
   font-size:calc(var(--kfs) * 1.18);opacity:.34;color:var(--txt2);
   transition:opacity .28s ease,color .28s ease,background .28s ease}
 /* ami meg nem jart le: szurke, olvashato, de nem huzza a szemet */
-body.learn.paged .hs.soon{opacity:.40;color:var(--txt2)}
+body.huFull.paged .hs.soon{opacity:.40;color:var(--txt2)}
 /* ami mar volt: beszurkul — a lap fentrol lefele „elhasznalodik" */
-body.learn.paged .hs.done{opacity:.16;color:var(--txt2)}
-body.learn.paged .hs.cur{opacity:1;color:var(--txt);font-size:calc(var(--kfs) * 1.18);
+body.huFull.paged .hs.done{opacity:.16;color:var(--txt2)}
+body.huFull.paged .hs.cur{opacity:1;color:var(--txt);font-size:calc(var(--kfs) * 1.18);
   border-color:var(--line);background:rgba(18,16,26,.90);
   box-shadow:0 12px 40px rgba(0,0,0,.5)}
 /* a borító előtt a nem aktuális sorok is kapnak halvány fekete alapot, hogy a
    szürke szöveg olvasható maradjon a képen */
-body.learn.paged.hascover .hs:not(.cur){background:rgba(8,7,11,.58);
+body.huFull.paged.hascover .hs:not(.cur){background:rgba(8,7,11,.58);
   box-shadow:none;border-radius:var(--r3);width:auto}
 /* lapozas: rovid elhalvanyulas, hogy latszodjon, hogy UJ lap jott, ne ugras legyen */
-body.learn.paged #huFlow{transition:opacity .15s ease}
-body.learn.paged #huFlow.turn{opacity:0}
+body.huFull.paged #huFlow{transition:opacity .15s ease}
+body.huFull.paged #huFlow.turn{opacity:0}
 /* a lap szele: halvany arany vonal a sav aljan, mint egy oldal alja */
-body.learn.paged #huWrap:after{content:'';position:absolute;left:0;right:0;bottom:0;
+body.huFull.paged #huWrap:after{content:'';position:absolute;left:0;right:0;bottom:0;
   height:1px;background:linear-gradient(90deg,transparent,rgba(232,182,76,.18),transparent);
   pointer-events:none}
 .hs.gapline{color:var(--faint);font-family:var(--mono);font-size:var(--t2);cursor:default}
@@ -409,10 +411,10 @@ body.playing.yt #ytBar{display:block}
    mást csinál — az angolt csak HALLGATOD, a képernyőn csak a magyar van, nagy
    betűvel, és abba szövődnek bele azok az angol szavak, amiket már sokszor hallottál.
    Vészkijárat: hosszú koppintás a mondaton → az eredeti angol néhány másodpercre. */
-body.learn #karaWrap{display:none}
-body.learn #huWrap{width:min(38rem,96vw)}
-body.learn .hs{font-size:calc(var(--kfs) * 1.18);line-height:1.5}
-body.learn .hs.cur{font-size:calc(var(--kfs) * 1.5)}
+body.huFull #karaWrap{display:none}
+body.huFull #huWrap{width:min(38rem,96vw)}
+body.huFull .hs{font-size:calc(var(--kfs) * 1.18);line-height:1.5}
+body.huFull .hs.cur{font-size:calc(var(--kfs) * 1.5)}
 /* a beszőtt angol szó: a jelölés a találkozásokkal HALVÁNYUL — a szó lassan
    „megérkezik" a szövegbe, és ez látszik, nem egy pontszámban olvasható */
 .wv{font-style:normal;color:var(--gold);cursor:pointer;
@@ -1119,7 +1121,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v104';
+const APP_VER='v105';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -1191,6 +1193,9 @@ if(!CFG.huV2){ CFG.huV2=1; CFG.huMode='pin'; saveCfg(); }
 /* v18: a felezett elrendezés az új alapértelmezés. A megszűnt „a mondatnál" és
    „mindenhol" állások is ide állnak át; aki elrejtette a magyart, annak marad. */
 if(!CFG.huV3){ CFG.huV3=1; CFG.huMode=(CFG.huMode==='hide')?'hide':'split'; saveCfg(); }
+/* v105: aki a régi „fent" módban maradt, a felezett nézetre kerül (a „fent"
+   helyét a teljes képernyős magyar vette át) */
+if(CFG.huMode==='pin'){ CFG.huMode='split'; saveCfg(); }
 var spend=Object.assign({asrSec:0,tin:0,tout:0,calls:0},J('hg_spend',{}));
 const saveSpend=()=>store.set('hg_spend',JSON.stringify(spend));
 var cache=J('hg_cache',{});        /* angol mondat -> magyar */
@@ -5573,15 +5578,20 @@ function huGi(){
   return best;
 }
 const HUHALF=8;
+/* v105: a magyar folyam két nézetben fut: felezett (split) és teljes (full).
+   Egy helyen döntjük el, hogy a sok kapu ne csússzon szét. */
+const huFlowOn=()=>CFG.huMode==='split'||CFG.huMode==='full';
 function renderHu(force){
-  if(!REC||CFG.huMode!=='split') return;
+  if(!REC||!huFlowOn()) return;
   const box=$('huFlow'); if(!box) return;
   if(HUN!==REC.sen.length) huBuild();
   if(!HUG.length){ box.innerHTML=''; return }
   const gi=huGi();
   /* lapozós módban egy lapra több blokk is kerülhet, mint amennyit a ±8-as ablak
      biztosan tartalmaz — ezért tanuló módban szélesebb az ablak */
-  const half=CFG.learn?14:HUHALF;
+  /* v105: teljes képernyős nézetben több mondat fér a folyamba, mint a
+     felezettben — a régi tanulómódos érték most a full módé */
+  const half=CFG.huMode==='full'?14:HUHALF;
   const a=Math.max(0,gi-half), b=Math.min(HUG.length,gi+half+1);
   /* ha az ablak nem mozdult, csak a tartalmat és a kiemelést frissítjük — de a
      paintHu-t akkor is meg kell hívni, különben az aktuális buborék jelölése és
@@ -5710,7 +5720,7 @@ function clReady(c){
 }
 
 function paintHu(jump){
-  if(CFG.huMode!=='split') return;
+  if(!huFlowOn()) return;
   const box=$('huFlow'); if(!box) return;
   const gi=huGi();
   if(pagedOn()){
@@ -5758,7 +5768,7 @@ function bandTop(wrap,cur,a,b,pad){
    felső sávban), és csak akkor csökken, ha a mondat nem fér a sávba. Rövid
    mondatnál tehát semmi nem változik: pontosan úgy néz ki, mint fent. */
 function fitFlow(){
-  if(CFG.huMode!=='split') return;
+  if(!huFlowOn()) return;
   const hw=$('huWrap'), hb=$('huFlow'); if(!hw||!hb) return;
   const cur=hb.querySelector('.hs.cur'); if(!cur) return;
   const H=(hw.clientHeight||0)-24; if(H<60) return;
@@ -5786,7 +5796,9 @@ function fitFlow(){
    fut, és a folyamatos offsetTop-olvasás minden ciklusban újrarendezné a lapot. */
 let PGA=-1,PGB=-1,PGM=null,PGgi=-2,PGFIX=0,PGTURN=0;
 const pgReset=()=>{ PGA=PGB=-1; PGM=null; PGgi=-2 };
-const pagedOn=()=>!!(CFG.learn&&CFG.paged!==0&&CFG.huMode==='split');
+/* v105: a lapozás a teljes képernyős magyar nézet lehetősége (a beállításokban
+   választható). Alapértelmezés a folyamatos görgetés. */
+const pagedOn=()=>!!(CFG.huMode==='full'&&CFG.paged===1);
 function pgApplyBody(){ document.body.classList.toggle('paged',CFG.paged!==0) }
 /* a lap vége: az utolsó blokk, ami EGÉSZBEN kifér a sávba */
 function pgEnd(i,top,bot,H){ let e=i+1; while(e<top.length&&bot[e]-top[i]<=H) e++; return e }
@@ -5864,7 +5876,7 @@ function flashTick(){
   });
 }
 function scrollTick(jump){
-  if(CFG.huMode!=='split'||!REC||!REC.sen.length) return;
+  if(!huFlowOn()||!REC||!REC.sen.length) return;
   const gi=huGi();
   /* magyar oldal: mindig a felezővonal alatt kezdődik az aktuális mondat */
   const hw=$('huWrap'), hb=$('huFlow');
@@ -5890,7 +5902,7 @@ function scrollTick(jump){
    mert az egy- és kétsoros állapotjelző között változik. */
 function layoutSplit(){
   const root=document.documentElement, wrap=$('karaWrap');
-  const on=(CFG.huMode==='split'||CFG.learn)&&document.body.classList.contains('playing');
+  const on=huFlowOn()&&document.body.classList.contains('playing');
   if(!on){ root.style.removeProperty('--huH');
     if(wrap){ wrap.style.bottom=''; wrap.style.top='' }
     const h0=$('huWrap'); if(h0){ h0.style.height=''; h0.style.bottom='' } return }
@@ -5907,8 +5919,8 @@ function layoutSplit(){
      Szűk képernyőn (fekvő tájolás) a felezés nem tartható: ilyenkor is marad
      mindkét sáv, csak az angolnak garantálunk alsó korlátot. */
   let huH;
-  if(CFG.learn){
-    /* tanuló módban nincs angol sáv: a teljes terület a magyaré */
+  if(CFG.huMode==='full'){
+    /* v105: teljes képernyős magyar — a teljes sáv a magyaré, angol nincs */
     huH=band;
   }else{
     huH=Math.round((band-gap)/2);
@@ -5917,6 +5929,9 @@ function layoutSplit(){
     huH=Math.max(huH,Math.min(120,Math.round(band*0.45)));
   }
   root.style.setProperty('--huH',huH+'px');
+  /* v105: teljes módban az angol sáv nem kap helyet — el is rejtjük, hogy a
+     mögötte lévő szöveg ne látszódjon át a magyar mögött */
+  document.body.classList.toggle('huFull',CFG.huMode==='full');
   if(wrap) wrap.style.bottom=(inset+plH+gap+huH+gap)+'px';
   if(wrap) wrap.style.top=(hdr+vid)+'px';
   const hw=$('huWrap');
@@ -5946,7 +5961,7 @@ function paintCur(jump){
     const H=wrap.clientHeight, h=cur.offsetHeight;
     const dockH=($('dock')&&$('dock').offsetHeight)||220;
     let off;
-    if(CFG.huMode==='split'){
+    if(huFlowOn()){
       /* felezett elrendezésben a görgetést a scrollTick végzi: az angol buborék
          teteje kötött, a sávnál magasabb buborék pedig a beszéd tempójában
          gördül át — smooth animációval ez összeakadna. */
@@ -6008,13 +6023,13 @@ function tick(){
     bankCredit(CUR);      /* az imént befejezett mondat elszámolása */
     CUR=i;
     if(i<WIN[0]+4||i>=WIN[1]-4) renderKara(false); else paintCur(false);
-    if(CFG.huMode==='split') renderHu(false);
+    if(huFlowOn()) renderHu(false);
     saveHint();    if(CFG.trMode==='live') fillLive();
   }
   heardTick(t); flashTick();
   /* a görgetés minden ciklusban finomodik — ettől lesz a magyar folyam tempója
      azonos a beszéddel, nem ugrik mondatonként */
-  if(CFG.huMode==='split'){ syncHuFlow();
+  if(huFlowOn()){ syncHuFlow();
     if(pagedOn()) pgPaint(huGi(),false); else scrollTick(false) }
   /* szó-követés */
   if(CUR>=0){
@@ -6174,7 +6189,7 @@ function gotoSen(i){
   i=Math.max(0,Math.min(REC.sen.length-1,i));
   SEEKTO=i;
   A.currentTime=Math.max(0,REC.sen[i].a+0.02);
-  CUR=i; renderKara(false); if(CFG.huMode==='split') renderHu(false); paintCur(true);
+  CUR=i; renderKara(false); if(huFlowOn()) renderHu(false); paintCur(true);
 }
 /* A pótlás ugyanazon a futószalagon megy, mint a fordítás: látható folyamat,
    megszakítható, és a végén ment. */
@@ -6317,7 +6332,7 @@ function learnSet(on){
        párokkal megy; új párok most nem készülnek. */
     if(REC&&REC.sen.some(x=>x.hu&&(!x.pairs||!x.pairs.length)))
       toast('a szópár-gyűjtés most szünetel — a tanuló mód a meglévő párokkal megy',5000);
-    if(CFG.huMode!=='split'){ CFG.huMode='split'; drawHuBtn() }
+    if(!huFlowOn()){ CFG.huMode='split'; drawHuBtn() }
   }
   CFG.learn=on?1:0; saveCfg();
   document.body.classList.toggle('learn',on);
@@ -6948,11 +6963,14 @@ $('pLoop').onclick=()=>{
    mondatnál az angolhoz illesztett fordítás széttolja a folyamot, és pont a
    követést teszi lehetetlenné. Marad a felezés (alap), a gombok fölé rögzítés és
    a teljes elrejtés. A gomb KIÍRJA, hol áll — nem csak a toast mondja meg. */
-const HUMODES=['split','pin','hide'];
-const HUNAMES={split:'alul',pin:'fent',hide:'ki'};
+/* v105: a „fent" (pin) helyére a TELJES KÉPERNYŐS magyar nézet került. A gomb
+   helye és a koppintásos körforgás változatlan — csak a középső állás más. */
+const HUMODES=['split','full','hide'];
+const HUNAMES={split:'alul',full:'teljes',hide:'ki',pin:'fent'};
 const HUFULL={split:'magyar: a képernyő alsó felén',
-              pin:'magyar: a gombok felett rögzítve',
-              hide:'magyar: rejtve — koppints a mondatra'};
+              full:'magyar: a teljes képernyőn — angol sáv nélkül',
+              hide:'magyar: rejtve — koppints a mondatra',
+              pin:'magyar: a gombok felett rögzítve'};
 function drawHuBtn(){ $('pHu').innerHTML='HU<b>'+(HUNAMES[CFG.huMode]||'alul')+'</b>' }
 $('pHu').onclick=()=>{
   CFG.huMode=HUMODES[(HUMODES.indexOf(CFG.huMode)+1)%HUMODES.length];
@@ -9319,6 +9337,7 @@ function applyLook(){
   document.body.classList.toggle('hidehu',CFG.huMode==='hide');
   document.body.classList.toggle('pinhu',CFG.huMode==='pin');
   document.body.classList.toggle('splithu',CFG.huMode==='split');
+  document.body.classList.toggle('huFull',CFG.huMode==='full');
   document.body.classList.toggle('paged',CFG.paged!==0);
   layoutSplit();
 }
