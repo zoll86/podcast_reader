@@ -612,8 +612,10 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
   letter-spacing:.22em;text-transform:uppercase;white-space:nowrap}
 #libHead::after{content:'';flex:1 1 auto;height:1px;
   background:linear-gradient(90deg,rgba(232,182,76,.55),rgba(232,182,76,0))}
+/* v111: szűkebb rés — a csempék alól kikerült az adatsor, így a régi nagy
+   térköz csak üres helyet hagyott a nevek között */
 #lib.shelf{display:grid;grid-template-columns:repeat(auto-fill,minmax(104px,1fr));
-  gap:var(--sp5) var(--sp4)}
+  gap:var(--sp4) var(--sp3)}
 #lib.shelf .item{display:none}
 .bk{position:relative;cursor:pointer;-webkit-tap-highlight-color:transparent}
 .bk .art{position:relative;aspect-ratio:1/1;border-radius:var(--r3);overflow:hidden;
@@ -634,14 +636,16 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
 /* a polc lapja: mindig a borito alatt, a cim ELOTT — ezert egy sorban egy vonal */
 .bk .plc{height:2px;margin:5px -5px 0;border-radius:2px;
   background:linear-gradient(90deg,rgba(232,182,76,.02),rgba(232,182,76,.26),rgba(232,182,76,.02))}
-.bk b{display:block;font-size:var(--t2);font-weight:500;line-height:1.25;margin-top:7px;
-  height:2.5em;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;
+.bk b{display:block;font-size:var(--t2);font-weight:500;line-height:1.25;margin-top:6px;
+  overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;
   -webkit-box-orient:vertical}
 /* KOZVETLEN gyermek: a `.bk span` a meta soron beluli `.pill`-t (szinten span) is
    eltalalta, es a display:block-tol a pill teljes szelessegu savva nyult, majd
    rakuszott a kovetkezo sorra. A meta egy sor, es ha nem fer ki, levagjuk. */
 .bk > span{display:block;font-family:var(--mono);font-size:10px;color:var(--faint);
   margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* v111: üres adatsor ne foglaljon helyet (a legtöbb csempén már üres) */
+.bk > span:empty{display:none}
 .bk .pill{display:inline-block;vertical-align:baseline;margin-top:0}
 /* v56: 40px-es találati felület (Fitts) — a pötty rajza kisebb, a célja nem */
 .bk .more{position:absolute;top:2px;right:2px;width:40px;height:40px;padding:0;border:0;
@@ -1178,7 +1182,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v110';
+const APP_VER='v111';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -6164,17 +6168,35 @@ setInterval(fillLive,5000);
    élő pótló adja közvetlenül a fej előtt. Bekapcsolás a ⋯ „feldolgozás" menüből. */
 let FOLLOW_WARN=0;
 async function followTick(){
-  if(!CFG.follow||!REC||JOB.on) return;
-  if(!document.body.classList.contains('playing')) return;
-  if('onLine' in navigator&&!navigator.onLine) return;
-  if(!CFG.asrKey) return;
+  if(!CFG.follow||!REC) return;
+  /* v111: ha a mód be van kapcsolva, de valami útban van, egyszer megmondjuk —
+     eddig teljesen szótlanul nem történt semmi, és úgy tűnt, elromlott */
+  const gat=(!document.body.classList.contains('playing'))?null
+    :(JOB.on?null
+    :(('onLine' in navigator&&!navigator.onLine)?'nincs hálózat'
+    :(!CFG.asrKey?'nincs felismerő-kulcs (⚙ Beállítások)':'')));
+  if(gat){
+    if(Date.now()-FOLLOW_WARN>60000){ FOLLOW_WARN=Date.now();
+      log('kísérő mód áll: '+gat) }
+    return;
+  }
+  if(!document.body.classList.contains('playing')||JOB.on) return;
   const dur=REC.dur||A.duration||0;
   if(!dur) return;
   const plan=followPlan(REC.done,A.currentTime||0,dur);
   if(!plan) return;
   if(!MED){
+    /* v111: előbb a mappa — a kísérő mód eddig csendben elhalt, ha a
+       fájl-hivatkozás nem volt beállítva, holott a fájl megvan */
+    if(!FILE&&MAPPA){
+      try{
+        const f=await folderFind(REC);
+        if(f){ await safAttach(REC,f); log('kísérő: a hangfájl a mappából bekötve') }
+      }catch(e){}
+    }
     if(!FILE){
       if(Date.now()-FOLLOW_WARN>60000){ FOLLOW_WARN=Date.now();
+        log('kísérő mód: nincs meg a hangfájl — a könyvtárban húzd be újra');
         askAudio(REC) }                  /* v62: a hiány helyén a megoldás */
       return;
     }
@@ -7755,7 +7777,16 @@ async function sheetQueue(lid){
     lists().filter(x=>x.id!==l.id).forEach(x=>items.push({
       t:x.name+' ('+x.items.length+')',fn:()=>sheetQueue(x.id)}));
   }
-  sheet(l.name+' ('+l.items.length+')',items);
+  /* v111: a lista fejlécében az összesített hossz és a haladás — ez az a hely,
+     ahol egy sorozat összideje tényleg érdekes (a csempéken csak zaj volt) */
+  {
+    const met2=l.items.map(id=>byId[id]).filter(Boolean);
+    const ossz=met2.reduce((s,r)=>s+(r.dur||0),0);
+    const hall=met2.reduce((s,r)=>s+Math.min(r.pos||0,r.dur||0),0);
+    const p=ossz?Math.round(hall/ossz*100):0;
+    sheet(l.name+' ('+l.items.length+')'+(ossz?' · '+fmtT(ossz):'')+
+      (p?' · '+p+'%':''),items);
+  }
 }
 /* Egy felvétel listába rakása: ha már van lista, választhatsz közülük. */
 async function sheetAddTo(rec){
@@ -8167,15 +8198,19 @@ function bkCard(r,part){
   const mark=(r.kind==='yt')?' · YT':(r.hasAudio?'':' · hang ✗');
   /* v56: a 0% nem hír — jelvény csak akkor, ha tényleg folyamatban van; szöveg
      nélküli felvételnél a hiányt mondjuk ki (a „hang ✗" mintájára) */
+  /* v111: a csempék alól kikerült a mono adatsor — a polc így levegősebb és
+     tömörebb egyszerre. Az összesített idő és haladás a lista lapjának
+     fejlécében látszik, ahol tényleg számít. A hiányjelzések (szöveg ✗, hang ✗)
+     megmaradnak, mert azok tennivalót jelentenek. */
   const nincsSzoveg=!(r.sen&&r.sen.length);
   /* v100: ✓HU a csempén — kész magyar fordítás (a mondatok ≥95%-ának van
      magyarja). Innen látszik, mi hallgatható most, fordításra várás nélkül. */
   const sn=r.sen||[];
   const huKesz=sn.length&&sn.filter(s=>s.hu).length/sn.length>=0.95;
-  el.querySelector('span').innerHTML=esc(fmtT(r.dur))+(pos?' · '+pos+'%':'')+
-    (huKesz?' · <span class="huok">HU</span>':'')+
-    (pct>0&&pct<99?' · <span class="pill part">'+pct+'%</span>'
-      :(pct<=0&&nincsSzoveg?' · szöveg ✗':''))+mark;
+  el.querySelector('span').innerHTML=
+    (huKesz?'<span class="huok">HU</span>':'')+
+    (pct>0&&pct<99?(huKesz?' · ':'')+'<span class="pill part">'+pct+'%</span>'
+      :(pct<=0&&nincsSzoveg?(huKesz?' · ':'')+'szöveg ✗':''))+mark;
   el.onclick=()=>openRec(r);
   el.querySelector('.more').onclick=e=>{ e.stopPropagation(); sheetItem(r) };
   /* nyitott listában: kivétel egy koppintással — a felvétel MEGMARAD a könyvtárban */
@@ -8707,7 +8742,17 @@ async function passRange(a,b){
 async function sheetProcess(){
   if(!REC) return;
   if(!CFG.asrKey){ show('vSet'); return toast('előbb add meg a felismerő kulcsát') }
-  if(!FILE){ return toast('húzd be újra a hangfájlt a könyvtárban') }
+  /* v111: a mappás használatban a fájl-hivatkozás elveszhet (felirat-behúzás
+     után, vagy újraindítás után), és akkor a lap azzal fogadott, hogy „húzd be
+     újra" — pedig a fájl ott van a mappában. Megkeressük magunktól. */
+  if(!FILE&&MAPPA){
+    try{
+      const f=await folderFind(REC);
+      if(f){ await safAttach(REC,f); log('a hangfájl a mappából bekötve:',
+        String(REC.name||'').slice(0,50)) }
+    }catch(e){ log('a hangfájl bekötése nem sikerült:',e) }
+  }
+  if(!FILE){ return toast('a hangfájl nincs meg — a könyvtárban húzd be újra, vagy jelöld ki a podcast-mappát',7000) }
   const dur=REC.dur||A.duration||0;
   const t=A.currentTime||0;
   const gap=nextGap(REC.done,0,dur);
