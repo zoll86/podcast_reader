@@ -1201,7 +1201,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v114';
+const APP_VER='v115';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -3243,7 +3243,11 @@ const bankStat=()=>{
 const JOB={on:false,stop:false,id:null};
 function progShow(on){ $('prog').classList.toggle('on',!!on) }
 let JOBPCT=0;
+/* v115: az utolsó életjel ideje. A futó munka minden lépésnél (és minden
+   kvóta-várakozásnál) frissíti; ebből tudja az őrszem, hogy él-e még. */
+let JOBTS=0;
 function progSet(pct,title,msg,stopLabel){
+  JOBTS=Date.now();
   if(pct!=null){
     JOBPCT=pct;
     $('progP').textContent=Math.round(pct)+'%';
@@ -3268,6 +3272,23 @@ function jobDotDraw(msg){
     : Math.round(JOBPCT)+'%';
 }
 setInterval(()=>jobDotDraw(),1500);
+/* ======== v115: ŐRSZEM ========
+   Ha a „fut egy feldolgozás" jelzés bent ragad (a munka közben elhalt), minden
+   további indítás csendben elhal — leginkább a kísérő mód, ami emiatt teljesen
+   működésképtelennek tűnt. Nyolc perc mozdulatlanság után elengedjük. */
+const JOB_HOLT_MS=8*60*1000;
+function jobWatch(){
+  if(!JOB.on) return;
+  if(!JOBTS){ JOBTS=Date.now(); return }
+  if(Date.now()-JOBTS<JOB_HOLT_MS) return;
+  const perc=Math.round((Date.now()-JOBTS)/60000);
+  JOB.on=false; JOB.stop=true; JOBTS=0;
+  try{ progShow(false); jobDotDraw() }catch(e){}
+  log('a futó feldolgozás '+perc+' perce nem adott életjelet — a jelzést elengedtem, '+
+      'új feldolgozás (és a kísérő mód) újra indulhat');
+  toast('egy félbeszakadt feldolgozás jelzését elengedtem — indíthatsz újat',6000);
+}
+setInterval(jobWatch,30000);
 /* a feldolgozott szakaszok egyesítése, hogy folytatható legyen */
 function mergeDone(done,a,b){
   const out=[...done,[a,b]].sort((x,y)=>x[0]-y[0]); const res=[];
@@ -5114,7 +5135,7 @@ async function runQueue(recsIn,cimke){
 async function runJob(rec,M,from,to,opts){
   opts=opts||{};
   if(JOB.on){ toast('már fut egy feldolgozás'); return }
-  JOB.on=true; JOB.stop=false; JOB.id=rec.id;
+  JOB.on=true; JOB.stop=false; JOB.id=rec.id; JOBTS=Date.now();
   if(!opts.quiet){
     progShow(true); $('progHide').classList.add('hid'); $('progStop').textContent='szüneteltetés';
   }
@@ -6191,7 +6212,7 @@ async function followTick(){
   /* v111: ha a mód be van kapcsolva, de valami útban van, egyszer megmondjuk —
      eddig teljesen szótlanul nem történt semmi, és úgy tűnt, elromlott */
   const gat=(!document.body.classList.contains('playing'))?null
-    :(JOB.on?null
+    :(JOB.on?'egy másik feldolgozás fut — annak a végét várja'
     :(('onLine' in navigator&&!navigator.onLine)?'nincs hálózat'
     :(!CFG.asrKey?'nincs felismerő-kulcs (⚙ Beállítások)':'')));
   if(gat){
@@ -8782,6 +8803,12 @@ function sheetShop(){
     MAPPA?{t:'feliratok behúzása a mappából (név szerint)',fn:()=>subsSync(false)}:null,
     MAPPA?{t:'borítók begyűjtése a hangfájlokból',fn:()=>coverGather(false)}:null,
     MAPPA?{t:'borító-vizsgálat (3 fájl, részletes napló)',fn:()=>coverProbe()}:null,
+    JOB.on?{t:'beragadt „feldolgozás fut" jelzés elengedése',fn:()=>{
+      JOB.on=false; JOB.stop=true; JOBTS=0;
+      try{ progShow(false); jobDotDraw() }catch(e){}
+      log('a feldolgozás-jelzés kézzel elengedve');
+      toast('elengedve — indíthatsz új feldolgozást',5000);
+    }}:null,
     {head:'ez a rész'},
     {t:'borító beállítása képből',fn:()=>askCover(REC)},
     {t:'kivitel: kétnyelvű TSV',fn:()=>exportTsv(REC)},
