@@ -1178,7 +1178,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v109';
+const APP_VER='v110';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -1932,6 +1932,8 @@ async function cutWav(M,t0,t1){
    - ID3v2.2 (3 betűs 'PIC' keretek);
    - és ha a szerkezet olvashatatlan, nyers képkeresés a tag területén.
    Diagnosztika a naplóba, hogy kudarcnál lássuk, melyik lépcsőn bukott. */
+/* v110: a borító-kinyerő naplózása csak kézi vizsgálatnál (coverProbe) */
+let COVLOG=0;
 async function id3Cover(file){
   try{
     const h=await readSlice(file,0,Math.min(file.size,10));
@@ -2038,8 +2040,11 @@ async function id3Cover(file){
         }
       }
     }
-    log('borító: ID3v2.'+ver+' tag ('+fmtMB(size)+', '+keret+' keret átnézve) — APIC/kép nincs benne');
-  }catch(e){ log('borító-olvasás hiba: '+String(e&&(e.message||e)).slice(0,80)) }
+    /* v110: ez a sor csak kézi vizsgálatnál kell — egyébként minden fájlnál
+       egy „nem találtam" bejegyzés lenne, ami elmossa a fontos sorokat */
+    if(COVLOG) log('borító: ID3v2.'+ver+' tag ('+fmtMB(size)+', '+keret+
+      ' keret átnézve) — APIC/kép nincs benne');
+  }catch(e){ if(COVLOG) log('borító-olvasás hiba: '+String(e&&(e.message||e)).slice(0,80)) }
   return null;
 }
 
@@ -2114,8 +2119,8 @@ async function openMedia(file,onMsg){
   }
   if(!M.cover&&(M.kind==='mp3'||M.kind==='adts'||M.kind==='whole'))
     M.cover=await id3Cover(file).catch(()=>null);
+  /* v110: a hiányról nincs naplósor — nem hiba, és minden megnyitásnál jött */
   if(M.cover) log('borító:',M.cover.mime,fmtMB(M.cover.b.length));
-  else if(M.kind!=='wav') log('borító: a fájlban nincs beágyazott kép — a ⋯ menüből képből beállítható');
   return M;
 }
 function probeDur(file){
@@ -6719,8 +6724,9 @@ async function folderScan(csendben){
     log('mappa:',FOLDER.length,'hangfájl');
     /* v95: a feliratmappa átvizsgálása indításkor, csendben */
     setTimeout(()=>{ subsSync(true).catch(()=>{}) },1500);
-    /* v98: a hiányzó borítók pótlása indításkor, csendben */
-    setTimeout(()=>{ coverSweep(true).catch(()=>{}) },4000);
+    /* v110: az indításkori borító-begyűjtés kivéve — 150 fájlt nézett át
+       minden indulásnál, és teleírta a naplót azzal, hogy nem talált semmit.
+       A műhelyben megmaradt kézzel (borítók begyűjtése / borító-vizsgálat). */
     /* v69: az almappákból magától listát épít (csak a meglévő felvételekből) */
     folderLists(true).catch(e=>log('almappa-lista:',e));
   }catch(e){ log('mappa-olvasás:',e);
@@ -8673,7 +8679,7 @@ function sheetShop(){
     {t:'szöveg beillesztése vágólapról',fn:()=>askPaste(REC)},
     {head:'a mappából, minden részhez'},
     MAPPA?{t:'feliratok behúzása a mappából (név szerint)',fn:()=>subsSync(false)}:null,
-    MAPPA?{t:'borítók begyűjtése a hangfájlokból',fn:()=>coverSweep(false)}:null,
+    MAPPA?{t:'borítók begyűjtése a hangfájlokból',fn:()=>coverGather(false)}:null,
     MAPPA?{t:'borító-vizsgálat (3 fájl, részletes napló)',fn:()=>coverProbe()}:null,
     {head:'ez a rész'},
     {t:'borító beállítása képből',fn:()=>askCover(REC)},
@@ -8882,6 +8888,10 @@ async function fillMissing(){
    A teljes begyűjtés naplója 150 fájlnál kifutott, így nem látszott a lényeg. */
 async function coverProbe(){
   if(!MAPPA) return toast('ez a mappás alkalmazásban (APK) megy');
+  COVLOG=1;
+  try{ return await coverProbeBelso() } finally{ COVLOG=0 }
+}
+async function coverProbeBelso(){
   let all=[];
   try{ all=await txtAll() }catch(e){ return }
   const jelolt=all.filter(r=>!(r.cover&&r.cover.b&&r.cover.b.length)).slice(0,3);
@@ -8917,7 +8927,7 @@ async function coverProbe(){
   }
   toast('a vizsgálat kész — a napló alján látszik (⚙ → Hibanapló)',6000);
 }
-async function coverSweep(quiet){
+async function coverGather(quiet){
   if(!MAPPA){ if(!quiet) toast('ez a mappás alkalmazásban (APK) megy'); return }
   let all=[];
   try{ all=await txtAll() }catch(e){ return }
@@ -8963,8 +8973,9 @@ async function coverSweep(quiet){
     }catch(e){ if(nezve<=3) log('borító-vizsgálat '+nezve+' hiba: '+
       String(e&&(e.message||e)).slice(0,80)) }
   }
-  log('borító-begyűjtés: '+nezve+' fájl megnézve · '+kep+' kép pótolva'+
-      (nincs.length-nezve?' · '+(nincs.length-nezve)+' fájl nincs meg a mappában':''));
+  if(kep||!quiet)
+    log('borító-begyűjtés: '+nezve+' fájl megnézve · '+kep+' kép pótolva'+
+        (nincs.length-nezve?' · '+(nincs.length-nezve)+' fájl nincs meg a mappában':''));
   if(kep){ drawLib(); if(frissul) renderKara(false); }
   if(!quiet) toast('borítók: '+kep+' kép pótolva',5000);
 }
