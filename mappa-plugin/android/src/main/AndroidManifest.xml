@@ -2,6 +2,8 @@
     <!-- v90: előtér-szolgáltatás a háttér-előfelismeréshez.
          A jogok és a szolgáltatás a manifest-összefésüléssel kerülnek az
          app manifestjébe — a fő projekthez nem kell nyúlni. -->
+    <!-- v107: a WebView navigator.vibrate CSAK ezzel a joggal működik -->
+    <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
