@@ -1229,7 +1229,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v121';
+const APP_VER='v122';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -5706,11 +5706,17 @@ function gateMi(t){
   if(huHiany(REC,t,cel)&&engReady(CFG.tr)!==false) return 'fordítás';
   return '';
 }
+/* v122: a kapu BIZTOSÍTÉKA. Ha a tartalék nem épül (nincs hangfájl, elakadt a
+   felismerő, kiesett a felvétel), a kapu nem tarthatja fogva a lejátszást:
+   ennyi idő haladás nélkül elengedi, és MEGMONDJA, mi volt a baj. A hallgatás
+   fontosabb, mint a tartalék. */
+const GATE_MAX=25000;
 function gateIndit(mit){
   if(!REC) return;
   const t=A.currentTime||0, dur=REC.dur||A.duration||0;
   const cel=gateCel(t,dur);
   GATE.on=true; GATE.mit=mit; GATE.ig=cel;
+  GATE.kezd=Date.now(); GATE.halad=frontOf(REC.done,t); GATE.hu=huHiany(REC,t,cel);
   log('kapu: az indulás előtt tartalékot építünk — '+fmtT(t)+' → '+fmtT(cel)+
       ' ('+mit+')');
   if(CFG.asrKey&&frontOf(REC.done,t)<cel-1)
@@ -5729,7 +5735,24 @@ setInterval(()=>{
         log('kapu: megvan a tartalék — indul a lejátszás');
         motorPanel();
         _playRaw().catch(e=>toast('nem indul: '+String(e&&(e.message||e)).slice(0,60)));
+        return;
       }
+      /* halad-e egyáltalán? bármi új felismerés vagy fordítás számít */
+      const t2=A.currentTime||0;
+      const fr2=frontOf(REC.done,t2), hu2=huHiany(REC,t2,GATE.ig||gateCel(t2,REC.dur||0));
+      if(fr2>(GATE.halad||0)+0.5||hu2<(GATE.hu==null?1e9:GATE.hu)){
+        GATE.halad=fr2; GATE.hu=hu2; GATE.kezd=Date.now();
+        return;
+      }
+      if(Date.now()-(GATE.kezd||0)<GATE_MAX) return;
+      /* ══ a biztosíték ══ */
+      const ok=gateMiert();
+      GATE.on=false;
+      log('kapu: '+Math.round(GATE_MAX/1000)+' másodpercig nem épült a tartalék ('+ok+
+          ') — elengedem, a lejátszás indul szöveg nélkül');
+      toast('nem készül a szöveg: '+ok+' — elindítom a hangot, a részletek a ⚙ hibanaplóban',9000);
+      motorPanel();
+      _playRaw().catch(e=>toast('nem indul: '+String(e&&(e.message||e)).slice(0,60)));
       return;
     }
     /* menet közbeni kifutás: ha a hang beérné a kész szöveget, megállunk és
@@ -5750,6 +5773,22 @@ setInterval(()=>{
   }catch(e){}
 },1000);
 
+/* Egy mondatban: miért nem készül a szöveg? Ez megy a kapu paneljére, a
+   figyelmeztetésbe és a naplóba — soha ne kelljen találgatni. */
+function gateMiert(){
+  if(!REC) return 'nincs megnyitott felvétel';
+  if(!CFG.asrKey) return 'nincs felismerő-kulcs (⚙ Beállítások → Beszédfelismerés)';
+  if('onLine' in navigator&&!navigator.onLine) return 'nincs hálózat';
+  const hol=hangHol(REC);
+  if(hol==='nincs') return 'ehhez a részhez nem találok hangfájlt (⋯ → műhely → hang)';
+  if(MOTOR.kihagy[REC.id]) return String(MOTOR.kihagy[REC.id]).slice(0,80);
+  if(MOTOR.hiba) return String(MOTOR.hiba).slice(0,80);
+  if(MOTOR.varasIg>Date.now())
+    return 'a felismerő kvótára vár még '+Math.ceil((MOTOR.varasIg-Date.now())/1000)+' s-ot';
+  if(JOB.on||RT) return 'a műhely kézi menete fut';
+  if(!MOTOR.fut&&!MOTOR.sor.length) return 'a motor nem kapott feladatot';
+  return MOTOR.miert||'a felismerő nem válaszol';
+}
 /* ══════════════════════════════════════════════════════════════════════════
    INDÍTÓK — mindenki csak a sorba tesz
    ══════════════════════════════════════════════════════════════════════════ */
@@ -5811,9 +5850,11 @@ function motorPanel(){
       const kesz=Math.max(0,Math.min(1,(fr-most)/Math.max(1,cel-most)));
       progShow(true);
       $('progHide').classList.add('hid');
-      progSet(Math.max(3,kesz*100),'előkészítés',
-        'a hang akkor indul, ha megvan az első '+Math.round((cel-most))+' másodperc '+
-        'szövege — most tart: '+fmtT(fr)+(MOTOR.miert?' · '+MOTOR.miert:''),'megszakítás');
+      const allj=MOTOR.feladat?(MOTOR.cim||'dolgozom'):gateMiert();
+      progSet(Math.max(3,kesz*100),'előkészítés — '+(GATE.mit||''),
+        'a hang akkor indul, ha megvan az első '+Math.round(cel-most)+' másodperc '+
+        'szövege (most: '+fmtT(fr)+') · '+allj+
+        ' · ha nem halad, magától elindul','megszakítás');
       $('progGo').classList.remove('hid');
       return;
     }
