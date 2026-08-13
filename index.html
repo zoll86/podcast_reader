@@ -812,9 +812,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
         <button data-k="1">be</button>
         <button data-k="0">ki</button>
       </div>
-      <div class="note">Rövid rezgés minden koppintásra — a nagyobb tettek
-        (törlés, felismerés indítása) kicsit hosszabbat adnak. Ha a telefonon
-        a rendszerszintű haptika ki van kapcsolva, ez sem érezhető.</div>
+      <div class="note" id="hapNote"></div>
       <label class="lbl">kezelők elrejtése hallgatás közben</label>
       <div class="seg" id="segImm">
         <button data-k="5">5 mp után</button>
@@ -1156,7 +1154,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v106';
+const APP_VER='v107';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -9426,7 +9424,12 @@ function drawSet(){
   segFill($('segShelf'),[[1,'könyvespolc'],[0,'lista']],CFG.shelf!==0?1:0,k=>{
     CFG.shelf=+k; saveCfg(); drawSet(); drawLib() });
   segFill($('segHap'),[[1,'be'],[0,'ki']],CFG.hap?1:0,k=>{
-    CFG.hap=+k?1:0; saveCfg(); if(CFG.hap) buzz(18) });
+    /* v107: a kijelölést is újra kell rajzolni — nélküle a gomb „nem reagált" */
+    CFG.hap=+k?1:0; saveCfg(); drawSet(); if(CFG.hap) buzz(20) });
+  { const n=$('hapNote');
+    if(n) n.textContent=(navigator.vibrate)
+      ? 'Rövid rezgés minden koppintásra; a nagyobb tettek (törlés, felismerés indítása) hosszabbat adnak.'
+      : 'Ez a változat nem tud rezegni (a rendszer nem adja a rezgés-hozzáférést) — telepítsd az új APK-t, és a telefon beállításaiban legyen bekapcsolva az érintési visszajelzés.'; }
   segFill($('segImm'),[[5,'5 mp után'],[10,'10 mp után'],[0,'soha']],+CFG.immSec||0,k=>{
     CFG.immSec=+k; saveCfg(); drawSet(); if(!k) immSet(false); else immArm() });
   segFill($('segHu'),[['split','alul, felezve'],['pin','gombok felett'],['hide','rejtve']],
