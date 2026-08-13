@@ -1229,7 +1229,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v120';
+const APP_VER='v121';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -1537,7 +1537,26 @@ function b64bytes(x){
   for(let i=0;i<n;i++) out[i]=bin.charCodeAt(i);
   return out;
 }
-async function safReadOne(uri,off,len){
+/* ══════════ v121: EGYSZERRE EGY NATÍV OLVASÁS ══════════
+   A napló szerint két megnyitás futott egyszerre ugyanarra a fájlra (két
+   bájttartomány, ugyanabban a másodpercben), és a natív olvasó ettől befagyott:
+   a kérés SOHA nem tért vissza. Két baj volt egyszerre, mindkettőt orvosoljuk:
+   a hívások sorban mennek, és van saját időkorlátjuk — így a beragadás
+   HIBÁVÁ válik, amit a safRange el tud kapni, és HTTP-re válthat. Eddig a
+   20 másodperces korlát a readSlice-ban ült, a tartalékúton KÍVÜL, ezért a
+   fallback be sem lépett. */
+let SAFLANC=Promise.resolve();
+const SAF_VAR=12000;
+function safReadOne(uri,off,len){
+  const p=SAFLANC.then(()=>Promise.race([
+    safReadRaw(uri,off,len),
+    new Promise((_,rej)=>setTimeout(()=>rej(new Error(
+      'a natív olvasás '+(SAF_VAR/1000)+' s alatt nem válaszolt')),SAF_VAR))
+  ]));
+  SAFLANC=p.then(()=>{},()=>{});
+  return p;
+}
+async function safReadRaw(uri,off,len){
   const r=await MAPPA.read({uri:uri,offset:off,length:len});
   const b=r&&(r.data!=null?r.data:(r.b64!=null?r.b64:(r.base64!=null?r.base64:r.bytes)));
   if(b==null) throw new Error('a plugin read() nem adott adatot');
@@ -2186,11 +2205,20 @@ async function openMedia(file,onMsg){
 }
 function probeDur(file){
   return new Promise((res,rej)=>{
-    const a=document.createElement('audio'), u=URL.createObjectURL(file);
+    /* v121: a mappás fájl nem Blob, hanem proxy — annak a kiszolgáló-URL-je
+       kell, különben „createObjectURL … Overload resolution failed” a napló
+       (ez volt a szeletelhetetlen felépítés utolsó sora) */
+    const a=document.createElement('audio');
+    let u=null, blobUrl=false;
+    if(file&&file.saf&&file.url) u=file.url;
+    else{
+      try{ u=URL.createObjectURL(file); blobUrl=true }
+      catch(e){ return rej(new Error('ehhez a fájlhoz nem tudok lejátszót nyitni')) }
+    }
+    const eldob=()=>{ if(blobUrl) try{ URL.revokeObjectURL(u) }catch(e){} };
     a.preload='metadata'; a.src=u;
-    a.onloadedmetadata=()=>{ const d=a.duration; URL.revokeObjectURL(u);
-      res(isFinite(d)?d:0) };
-    a.onerror=()=>{ URL.revokeObjectURL(u); rej(new Error('a böngésző nem tudta megnyitni ezt a hangfájlt')) };
+    a.onloadedmetadata=()=>{ const d=a.duration; eldob(); res(isFinite(d)?d:0) };
+    a.onerror=()=>{ eldob(); rej(new Error('a böngésző nem tudta megnyitni ezt a hangfájlt')) };
     setTimeout(()=>rej(new Error('a hangfájl fejléce nem olvasható')),8000);
   });
 }
@@ -5286,21 +5314,70 @@ async function motorRec(id){
   return r;
 }
 const MMED={id:'',M:null};
+/* a felvétel hangja fájlként — előbb a bemásolt, aztán a mappás */
+async function motorFajl(rec){
+  if(rec.hasAudio&&rec.ach){
+    const f=await audLoad(rec.id,rec.ach,'audio/'+(rec.kind==='mp3'?'mpeg':'mp4')).catch(()=>null);
+    if(f) return f;
+  }
+  if(!mappaVan()) return null;
+  const f=await folderFind(rec);
+  return f?safFile(f):null;
+}
+/* ══════════ v121: HA A MAPPÁBÓL NEM OLVASHATÓ, BEMÁSOLJUK ══════════
+   Volt olyan fájl, amit a natív olvasó nem adott ki (a kérés nem tért vissza),
+   és a felismerés emiatt egyszerűen nem indult el — a felhasználó annyit
+   látott, hogy „nem csinálja meg”. Innentől a program magától bemásolja a
+   fájlt a telefon saját tárolójába, MEGMONDJA, hogy ez folyik, és utána
+   folytatja. Egy felvételre egyszer próbálkozunk. */
+const MASOLT={};
+async function hangBemasol(rec,mert){
+  if(!mappaVan()||MASOLT[rec.id]||BG.on) return false;
+  MASOLT[rec.id]=1;
+  const f=await folderFind(rec);
+  if(!f) return false;
+  log('a mappából nem olvasható ('+String(mert||'').slice(0,60)+') — '+
+      'bemásolom a telefon tárolójába: '+f.name);
+  toast('ezt a fájlt a mappából nem lehet olvasni — bemásolom a telefonra. '+
+        'Amíg tart, a felismerés áll; utána magától folytatódik.',8000);
+  const volt=CFG.keepAudio; CFG.keepAudio=1;      /* a bemásolás most nem opció */
+  try{ await bgSaveAudio(rec,safFile(f)) }
+  catch(e){ log('bemásolás nem sikerült: '+String(e&&(e.message||e)).slice(0,80)) }
+  CFG.keepAudio=volt;
+  if(rec.hasAudio){
+    log('bemásolva — innentől a telefon tárolójából megy: '+String(rec.name||'').slice(0,40));
+    toast('bemásolva — folytatom',4000);
+    if(MMED.id===rec.id){ MMED.id=''; MMED.M=null }
+    if(REC&&REC.id===rec.id){ MED=null; FILE=null }
+    return true;
+  }
+  return false;
+}
 async function motorMedia(rec){
   if(REC&&REC.id===rec.id){
     if(!MED){
       if(!FILE&&MAPPA){
         try{ const f=await folderFind(rec); if(f) await safAttach(rec,f) }catch(e){}
       }
-      if(FILE){ try{ await prepMedia() }catch(e){} }
+      if(FILE){ try{ await prepMedia() }catch(e){ log('előkészítés:',e) } }
     }
     if(MED) return MED;
   }
   if(MMED.id===rec.id&&MMED.M) return MMED.M;
-  if(!MAPPA) throw Object.assign(new Error('a hangfájl nincs bekötve'),{vegzetes:1});
-  const f=await folderFind(rec);
-  if(!f) throw Object.assign(new Error('a hangfájl nincs meg a mappában'),{vegzetes:1});
-  const M=await openMedia(safFile(f),()=>{});
+  const file=await motorFajl(rec);
+  if(!file) throw Object.assign(new Error(mappaVan()
+    ?'a hangfájl nincs meg a mappában':'a hangfájl nincs bekötve'),{vegzetes:1});
+  let M=null;
+  try{ M=await openMedia(file,()=>{}) }
+  catch(e){
+    if(await hangBemasol(rec,e&&(e.message||e))) return await motorMedia(rec);
+    throw e;
+  }
+  /* a bontók egyike sem ismerte fel ÉS a hossz sem jött meg: ez a mappás
+     olvasás csendes elhalása — bemásolás után újra megnézzük */
+  if(M.kind==='whole'&&!(M.dur>1)&&file.saf){
+    if(await hangBemasol(rec,'a fájl a mappából nem szeletelhető')) return await motorMedia(rec);
+  }
   MMED.id=rec.id; MMED.M=M;
   if(!(rec.dur>1)&&M.dur>1){ rec.dur=M.dur; await save(rec) }
   return M;
@@ -5703,6 +5780,7 @@ function motorForditMind(rec){
 /* sorozat-előfelismerés: egy lista szöveg nélküli részei, háttérben */
 let QSTOP=false;
 async function runQueue(recsIn,cimke){
+  try{ await folderBind() }catch(e){}      /* v121: előbb kössük be, ami a mappában van */
   const todo=(recsIn||[]).filter(r=>r&&!(r.sen||[]).length);
   if(!todo.length) return toast('ebben a listában minden résznek van már szövege',5000);
   if(!MAPPA) return toast('az előfelismeréshez a mappás alkalmazás (APK) kell',5000);
@@ -7111,6 +7189,7 @@ async function folderScan(csendben){
     FOLDER=(r.files||[]).sort((a,b)=>
       String(a.folder||'').localeCompare(String(b.folder||''),'hu')||
       String(a.name||'').localeCompare(String(b.name||''),'hu',{numeric:true}));
+    await folderBind();               /* v121: hang bekötése minden felvételhez */
     await folderDraw();
     if(!csendben) toast(FOLDER.length+' hangfájl a mappában',3500);
     log('mappa:',FOLDER.length,'hangfájl');
@@ -7123,6 +7202,54 @@ async function folderScan(csendben){
     folderLists(true).catch(e=>log('almappa-lista:',e));
   }catch(e){ log('mappa-olvasás:',e);
     if(!csendben) toast('a mappa nem olvasható — jelöld ki újra',4500) }
+}
+/* ══════════════════════════════════════════════════════════════════════════
+   v121: HOL VAN A HANG?
+   A csempe eddig „hang ✗”-et írt minden mappás felvételre, mert csak a
+   BEMÁSOLT hangot ismerte el. Így nem lehetett látni, minek van hangja és
+   minek nincs — pedig a mappában ott volt. Innentől három állapot van, és
+   mindhárom látszik:
+     'benn'  — a hang a program tárolójában (bemásolva)
+     'mappa' — a hang a kijelölt podcast-mappában (ez az alap; nem kell másolni)
+     'nincs' — sehol
+   ══════════════════════════════════════════════════════════════════════════ */
+/* egyetlen helyen dől el, van-e mappás (APK) háttér — így a hangkezelés
+   végigmérhető, és nem szórjuk szét a `MAPPA` vizsgálatát a kódban */
+function mappaVan(){ return !!MAPPA }
+function hangHol(rec){
+  if(!rec) return 'nincs';
+  if(rec.kind==='yt'&&rec.ytid) return 'yt';
+  if(rec.hasAudio) return 'benn';
+  if(rec.saf&&mappaVan()) return 'mappa';
+  if(mappaVan()&&(FOLDER||[]).some(x=>safId(x)===rec.id)) return 'mappa';
+  return 'nincs';
+}
+const HANGSZO={benn:'a telefonon',mappa:'a mappából',nincs:'nincs hang',yt:'YouTube'};
+/* A mappa beolvasása után minden felvételhez bekötjük a hangot, amit megtalálunk.
+   Eddig ez csak megnyitáskor történt meg, ezért a könyvtárban semmi nem látszott,
+   és a sorozat-előfelismerés is „nincs meg a fájl”-lal esett ki. */
+async function folderBind(){
+  if(!mappaVan()||!(FOLDER||[]).length) return 0;
+  let all=[];
+  try{ all=await txtAll() }catch(e){ return 0 }
+  const byId={};
+  for(const f of FOLDER) byId[safId(f)]=f;
+  const byNev={};
+  for(const f of FOLDER){
+    const k=String(f.name||'').replace(/\.[^.]+$/,'').trim().toLowerCase();
+    if(k&&!byNev[k]) byNev[k]=f;
+  }
+  let n=0;
+  for(const r of all){
+    if(r.kind==='yt') continue;
+    const f=byId[r.id]||byNev[String(r.name||'').trim().toLowerCase()];
+    if(f&&r.saf!==f.uri){
+      r.saf=f.uri;
+      try{ await txtPut(r); n++ }catch(e){}
+    }
+  }
+  if(n) log('mappa: '+n+' felvételhez bekötöttem a hangot (nem másolás, csak hivatkozás)');
+  return n;
 }
 async function folderDraw(){
   const box=$('folderList'); box.innerHTML='';
@@ -7617,7 +7744,8 @@ async function openRec(rec,fileMaybe){
   setHdrVar();
   setCover(rec);
   $('hTitle').querySelector('b').textContent=rec.name;
-  $('hTitle').querySelector('span').textContent=fmtT(rec.dur)+' · '+rec.sen.length+' mondat';
+  $('hTitle').querySelector('span').textContent=fmtT(rec.dur)+' · '+rec.sen.length+
+    ' mondat · '+(HANGSZO[hangHol(rec)]||'');
   A.playbackRate=CFG.rate;
   $('pRate').innerHTML='<b>'+String(CFG.rate).replace('.',',')+'×</b>';
   drawHuBtn(); immSet(false);
@@ -7728,10 +7856,19 @@ function askAudio(rec){
   items.push({t:'később',fn:()=>{}});
   sheet(rec&&rec.name||'nincs hang',items);
 }
+/* v121: ha a lejátszó és a motor egyszerre kér előkészítést, UGYANAZT a
+   megnyitást kapják — nem indul két párhuzamos fájlolvasás. Ez fagyasztotta le
+   a natív olvasót. */
+let MEDP=null;
 async function prepMedia(){
-  if(MED||!FILE) return MED;
-  MED=await openMedia(FILE,m=>progSet(1,'előkészítés',m));
-  return MED;
+  if(MED) return MED;
+  if(!FILE) return null;
+  if(!MEDP){
+    MEDP=openMedia(FILE,m=>progSet(1,'előkészítés',m))
+      .then(m=>{ MED=m; MEDP=null; return m })
+      .catch(e=>{ MEDP=null; throw e });
+  }
+  return MEDP;
 }
 /* A bezárásnak MINDIG le kell futnia. Eddig egyetlen kivétel a lezáró lépések
    bármelyikében (elszámolás, bankmentés, tárolóba írás) megakasztotta a `show('vLib')`-et,
@@ -8581,7 +8718,11 @@ function bkCard(r,part){
   el.querySelector('b').textContent=r.name;
   /* a csempe szűk: EGY rövid mono sor. Ami rendben van, arról nem írunk (a 100%-os
      feldolgozás nem hír); csak ami hiányzik vagy folyamatban van. */
-  const mark=(r.kind==='yt')?' · YT':(r.hasAudio?'':' · hang ✗');
+  /* v121: a hang FORRÁSA látszik, nem csak a hiánya. A mappából érkező hang
+     teljes értékű — eddig „hang ✗”-et kapott, ami félrevezetett. */
+  const hol=hangHol(r);
+  const mark=hol==='yt'?' · YT':hol==='mappa'?' · <span class="pill">mappa</span>'
+    :hol==='nincs'?' · hang ✗':'';
   /* v56: a 0% nem hír — jelvény csak akkor, ha tényleg folyamatban van; szöveg
      nélküli felvételnél a hiányt mondjuk ki (a „hang ✗" mintájára) */
   /* v111: a csempék alól kikerült a mono adatsor — a polc így levegősebb és
@@ -9152,6 +9293,18 @@ function sheetShop(){
     {t:'újrafordítás a beállított motorral',fn:()=>reTranslate(REC)},
     {t:'szöveg betöltése fájlból (SRT / kétnyelvű TSV)',fn:()=>askImport(REC)},
     {t:'szöveg beillesztése vágólapról',fn:()=>askPaste(REC)},
+    {head:'hang'},
+    (function(){
+      const hol=hangHol(REC);
+      if(hol==='benn') return {note:'A hang a telefon tárolójában van — a mappa '+
+        'nélkül is működik.'};
+      if(hol==='mappa') return {t:'a hang bemásolása a telefonra (ha a mappából '+
+        'akadozik az olvasás)',fn:async()=>{ closeSheet();
+          delete MASOLT[REC.id];
+          await hangBemasol(REC,'kézi kérés'); drawLib(); }};
+      return {note:'Ehhez a részhez nem találok hangot — a könyvtárban húzd be, '+
+        'vagy jelöld ki a podcast-mappát.'};
+    })(),
     {head:'a mappából, minden részhez'},
     MAPPA?{t:'feliratok behúzása a mappából (név szerint)',fn:()=>subsSync(false)}:null,
     MAPPA?{t:'borítók begyűjtése a hangfájlokból',fn:()=>coverGather(false)}:null,
@@ -10286,6 +10439,7 @@ window.HG={txtAll,txtGet,txtPut,txtDel,medAll,medGet,medDel,openMedia,cut,
   MOTOR, GATE, PRI, motorPush, motorNext, motorDrop, motorLoop, motorEbreszt,
   motorStop, motorKisero, motorTeljes, motorForditMind, motorAllapot, motorPanel,
   frontOf, huHiany, gateMi, gateIndit, kiseroWhy, motorHiba,
+  hangHol, mappaVan, folderBind, hangBemasol, motorMedia, motorFajl, prepMedia,
   asrSpent, asrSpentTxt, ASRSEC,
   parseSrt, parseTsv, importText, setCover, updHuBar, checkUpdate,
   drawSeek, layoutSplit, drawHuBtn, gotoSen, huBuild, renderHu, paintHu, scrollTick,
