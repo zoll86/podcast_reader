@@ -1109,6 +1109,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
       <div id="logOut" class="note" style="font-family:var(--mono);white-space:pre-wrap;word-break:break-word;line-height:1.6;max-height:14rem;overflow-y:auto;user-select:text"></div>
       <div class="row" style="margin-top:var(--sp3)">
         <button class="mini" id="logCopy">másolás</button>
+        <button class="mini" id="logDiag">önvizsgálat</button>
         <button class="mini" id="logClr">törlés</button>
       </div>
     </div>
@@ -1229,7 +1230,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v122';
+const APP_VER='v123';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -5752,7 +5753,20 @@ setInterval(()=>{
           ') — elengedem, a lejátszás indul szöveg nélkül');
       toast('nem készül a szöveg: '+ok+' — elindítom a hangot, a részletek a ⚙ hibanaplóban',9000);
       motorPanel();
-      _playRaw().catch(e=>toast('nem indul: '+String(e&&(e.message||e)).slice(0,60)));
+      _playRaw().then(()=>{
+        setTimeout(()=>{ if(A.paused){
+          const er=AEL.error;
+          log('a hang a kapu elengedése után SEM indult el — lejátszó: '+
+            (A.src?'van forrás':'NINCS FORRÁS')+', állapot '+AEL.readyState+'/4'+
+            (er?', hiba kód '+er.code:'')+
+            ' — futtasd le a ⚙ → Hibanapló → önvizsgálat menetet');
+          toast('a hang nem indul el — ⚙ Hibanapló → önvizsgálat megmondja, miért',9000);
+        } },1500);
+      }).catch(e=>{
+        log('a lejátszás elutasítva: '+String(e&&(e.message||e)).slice(0,90));
+        toast('nem indul a hang: '+String(e&&(e.message||e)).slice(0,60)+
+          ' — ⚙ Hibanapló → önvizsgálat',9000);
+      });
       return;
     }
     /* menet közbeni kifutás: ha a hang beérné a kész szöveget, megállunk és
@@ -8464,7 +8478,7 @@ async function feedGrab(it){
      nincs böngésző-tároló, nincs CORS, a fájl ott lesz, ahol a többi */
   if(MAPPA){
     try{
-      const cur=await MAPPA.current();
+      const cur=MAPPA?await MAPPA.current():{};
       if(cur&&cur.uri){
         const nev=fdSafe(it.title)+'.mp3';
         const fig=MAPPA.addListener('progress',ev=>{
@@ -10345,6 +10359,117 @@ function drawLog(){
   el.textContent=LOG.length?LOG.slice(-70).join('\n'):'még nincs bejegyzés';
   el.scrollTop=el.scrollHeight;
 }
+/* ══════════════════════════════════════════════════════════════════════════
+   v123: ÖNVIZSGÁLAT
+   Ha „nem csinál semmit”, nem tippelni kell, hanem MÉRNI. Ez a menet
+   végigmegy a teljes láncon — plugin, mappa, kiszolgáló, olvasás, megnyitás,
+   lejátszó, motor, kulcsok —, mindegyik lépést megméri, és magyar mondatban
+   kiírja, mi sikerült és mi nem. A napló kimásolható; ebből egyértelműen
+   látszik, hol törik meg a lánc.
+   ══════════════════════════════════════════════════════════════════════════ */
+async function onvizsgalat(){
+  const t0=Date.now();
+  const ido=()=>((Date.now()-t0)/1000).toFixed(1)+' s';
+  const hiba=e=>String(e&&(e.message||e.name||e)).slice(0,110);
+  log('════ ÖNVIZSGÁLAT ════');
+  log('1. program: '+APP_VER+' · '+(NATIV?'alkalmazás (APK)':'böngésző')+
+      ' · mappa-plugin: '+(mappaVan()?'van':'NINCS — enélkül a mappa nem érhető el'));
+  log('2. kulcsok: felismerő '+(CFG.asrKey?'megvan':'HIÁNYZIK')+
+      ' · fordító: '+(CFG.tr||'free')+(engReady(CFG.tr)===false?' (kulcs HIÁNYZIK)':' rendben')+
+      ' · hálózat: '+(('onLine' in navigator&&!navigator.onLine)?'NINCS':'van'));
+  log('3. motor: '+motorAllapot()+' · kapu: '+(GATE.on?'FUT (vár)':'áll')+
+      ' · beállítás: kapu '+(CFG.gate?'be':'ki')+', kísérő '+(CFG.follow?'be':'ki'));
+
+  let uri=null, fajl=null;
+  if(!mappaVan()){ log('4. mappa: nincs plugin — ez a lépés kimarad') }
+  else{
+    try{
+      const cur=MAPPA?await MAPPA.current():{};
+      uri=cur&&cur.uri||null;
+      log('4. kijelölt mappa: '+(uri?(cur.name||uri).slice(0,60):'NINCS KIJELÖLVE — '+
+        '⚙ → Podcast-mappa → mappa kijelölése'));
+    }catch(e){ log('4. a kijelölt mappa nem kérdezhető le: '+hiba(e)) }
+    try{
+      const r=MAPPA?await MAPPA.list():{files:FOLDER||[]};
+      const f=(r&&r.files)||[];
+      log('5. a mappában '+f.length+' hangfájl'+(f.length?(' — pl. '+
+        f.slice(0,3).map(x=>x.name).join(' | ')).slice(0,150):' (üres vagy nem olvasható)'));
+      if(FOLDER&&!FOLDER.length&&f.length) FOLDER=f;
+    }catch(e){ log('5. a mappa nem listázható: '+hiba(e)) }
+    try{
+      await srvReady();
+      log('6. helyi kiszolgáló: '+(SRV&&SRV.base?('fut — '+String(SRV.base).slice(0,50)):'NEM FUT'));
+    }catch(e){ log('6. a helyi kiszolgáló nem indult: '+hiba(e)) }
+  }
+
+  /* a vizsgált felvétel: a megnyitott, vagy az első a mappából */
+  let rec=REC;
+  if(!rec){
+    try{ const all=await txtAll(); rec=all&&all[0] }catch(e){}
+  }
+  if(!rec){ log('7. nincs vizsgálható felvétel — nyiss meg egyet, és futtasd újra'); }
+  else{
+    log('7. vizsgált rész: '+String(rec.name||'').slice(0,50)+' · hossz '+fmtT(rec.dur||0)+
+        ' · '+(rec.sen||[]).length+' mondat · hang: '+(HANGSZO[hangHol(rec)]||'?')+
+        ' · feldolgozva '+fmtT(doneSec(rec.done||[])));
+    if(mappaVan()){
+      let f=null;
+      try{ f=await folderFind(rec) }catch(e){ log('8. a mappában keresés hibája: '+hiba(e)) }
+      if(!f) log('8. a mappában NEM találom ehhez a részhez a fájlt (a név vagy a méret más) '+
+                 '— ez az egyik ok, amiért nem indul a felismerés');
+      else{
+        log('8. a fájl megvan a mappában: '+f.name+' · '+fmtMB(f.size||0));
+        fajl=safFile(f);
+        /* 8/a: natív olvasás — 16 bájt a fájl elejéről */
+        const a=Date.now();
+        try{
+          const u=await safReadOne(f.uri,0,16);
+          log('9. natív olvasás: RENDBEN, '+u.length+' bájt '+((Date.now()-a)/1000).toFixed(1)+' s alatt');
+        }catch(e){ log('9. natív olvasás: NEM MEGY ('+((Date.now()-a)/1000).toFixed(1)+' s) — '+hiba(e)) }
+        /* 8/b: HTTP olvasás ugyanarra */
+        const b=Date.now();
+        try{
+          const u=await safHttp(fajl.url,0,16);
+          log('10. HTTP olvasás: RENDBEN, '+u.length+' bájt '+((Date.now()-b)/1000).toFixed(1)+' s alatt');
+        }catch(e){ log('10. HTTP olvasás: NEM MEGY ('+((Date.now()-b)/1000).toFixed(1)+' s) — '+hiba(e)) }
+      }
+    }
+    if(!fajl&&rec.hasAudio&&rec.ach){
+      try{ fajl=await audLoad(rec.id,rec.ach,'audio/mpeg'); log('9. a hang a telefon tárolójából jön') }
+      catch(e){ log('9. a bemásolt hang nem olvasható: '+hiba(e)) }
+    }
+    /* 11: megnyitás (szeletelhetőség) */
+    if(fajl){
+      const c=Date.now();
+      try{
+        const M=await openMedia(fajl,()=>{});
+        log('11. megnyitás: '+M.kind+' · hossz '+fmtT(M.dur||0)+' · '+
+            ((Date.now()-c)/1000).toFixed(1)+' s'+
+            (M.kind==='whole'?' — FIGYELEM: nem szeletelhető, így a felismerés nem tud dolgozni':''));
+      }catch(e){ log('11. megnyitás: NEM SIKERÜLT ('+((Date.now()-c)/1000).toFixed(1)+' s) — '+hiba(e)) }
+    }else log('11. megnyitás: kimarad, mert nincs olvasható fájl');
+  }
+  /* 12: a lejátszó tényleges állapota */
+  const e=AEL.error;
+  log('12. lejátszó: '+(A.src?('forrás megvan'):'NINCS FORRÁS')+
+      ' · állapot '+AEL.readyState+'/4 · '+(A.paused?'áll':'megy')+
+      (e?(' · HIBA: '+({1:'megszakítva',2:'hálózati hiba',3:'nem dekódolható',
+        4:'nem támogatott vagy elérhetetlen forrás'}[e.code]||('kód '+e.code))):' · nincs hiba'));
+  /* 13: valódi próba — elindul-e a hang */
+  if(A.src&&A.paused){
+    try{
+      await _playRaw();
+      await sleep(1200);
+      log('13. próbaindítás: '+(A.paused?'a hang NEM indult el':'a hang elindult, '+
+        fmtT(A.currentTime)+'-nál jár'));
+      if(!A.paused) A.pause();
+    }catch(err){ log('13. próbaindítás: elutasítva — '+hiba(err)) }
+  }else log('13. próbaindítás: kimarad ('+(A.src?'már megy':'nincs forrás')+')');
+  log('════ ÖNVIZSGÁLAT VÉGE ('+ido()+') ════');
+  toast('az önvizsgálat kész — a napló alján olvasható; a „másolás” gombbal küldheted el',9000);
+  try{ $('logOut').scrollTop=$('logOut').scrollHeight }catch(x){}
+}
+$('logDiag').onclick=()=>{ onvizsgalat().catch(e=>log('önvizsgálat hiba:',e)) };
 $('logCopy').onclick=async()=>{
   const t='Kétnyelvű hallgató '+APP_VER+' · '+(navigator.userAgent||'')+'\n'+LOG.join('\n');
   try{ await navigator.clipboard.writeText(t); toast('a napló a vágólapon van — illeszd be a beszélgetésbe') }
