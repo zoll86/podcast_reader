@@ -897,7 +897,12 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
         <input type="password" id="asrKey" placeholder="gsk_… vagy sk-…" autocomplete="off">
         <label class="lbl">végpont</label>
         <input type="text" id="asrUrl" placeholder="https://api.groq.com/openai/v1">
-        <label class="lbl">pontosság</label>
+        <label class="lbl">futó munkák</label>
+      <button class="btn" id="stopAll">minden feldolgozás leállítása</button>
+      <div class="note" id="stopNote">Leállít mindent, ami épp fut vagy futni
+        próbál: felismerés, sorozat-előfelismerés, mondat-javítás, kísérő mód.
+        A kész szöveg és fordítás megmarad — csak a folyamatok állnak le.</div>
+      <label class="lbl">pontosság</label>
         <div class="seg" id="segAsrModel"></div>
         <div class="note" id="asrModelNote">A pontos modell (large-v3) kevesebb
           mondatot hagy ki zajos, zenés, több beszélős felvételnél. A gyors
@@ -1201,7 +1206,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v116';
+const APP_VER='v117';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -2508,16 +2513,35 @@ function asrPaceFeed(r,ok){
       if(!asrPaceSaid){ asrPaceSaid=1;
         log('ütemezés: 429 jött — mostantól '+asrGapMs/1000+
             ' s szünet a kérések közt, sikerekkel fokozatosan gyorsul'); }
+      /* v117: a 429 leggyakoribb oka az ÓRÁS hangkeret, nem a kérésszám */
+      if(Date.now()-(window.__q429||0)>120000){ window.__q429=Date.now();
+        log('kvóta: '+asrSpentTxt()) }
       /* v93: a beragadt százalék magyarázata a panelon és a pöttyön */
       if(JOB.on) progSet(null,null,
         'a felismerő kvótára vár (429) — magától folytatódik, ahogy a keret enged');
     }
   }catch(e){}
 }
+/* ======== v117: mennyi hangot küldtünk fel az elmúlt órában ========
+   A Groq ingyenes szintjén ez a valódi korlát (nem a kérésszám). A mérő
+   segít megérteni, miért jön a 429, és mikor lesz újra keret. */
+const ASRSEC=[];
+function asrSpent(){
+  const hat=Date.now()-3600000;
+  while(ASRSEC.length&&ASRSEC[0][0]<hat) ASRSEC.shift();
+  return ASRSEC.reduce((s,x)=>s+x[1],0);
+}
+function asrSpentTxt(){
+  const s=asrSpent();
+  const kov=ASRSEC.length?Math.max(0,Math.round((ASRSEC[0][0]+3600000-Date.now())/60000)):0;
+  return Math.round(s/60)+' perc hang az elmúlt órában'+
+    (kov?(' · a legrégebbi tétel '+kov+' perc múlva évül el'):'');
+}
 async function asrCall(blob,fileName,secs,hintPrev,temp,opts){
   if(!CFG.asrKey) throw new Error('nincs megadva a felismerő kulcsa (⚙ Beállítások)');
   const url=asrUrl(); if(!url) throw new Error('nincs megadva a felismerő végpontja');
   opts=opts||{};
+  if(secs>0) ASRSEC.push([Date.now(),secs]);
   const fd=new FormData();
   fd.append('file',blob,fileName);
   /* v76: a pótló futam MÁS modellt kérhet — ez a lényeg, lásd lentebb */
@@ -9668,6 +9692,26 @@ function drawSet(){
     CFG.paged=+k; saveCfg(); drawSet(); pgApplyBody(); pgReset(); renderHu(true) });
   segFill($('segShelf'),[[1,'könyvespolc'],[0,'lista']],CFG.shelf!==0?1:0,k=>{
     CFG.shelf=+k; saveCfg(); drawSet(); drawLib() });
+  { const b=$('stopAll'), n=$('stopNote');
+    if(b) b.onclick=()=>{
+      const volt=[];
+      if(JOB.on) volt.push('felismerés');
+      if(typeof QSTOP!=='undefined'&&!QSTOP) volt.push('sorozat-előfelismerés');
+      if(typeof RT!=='undefined'&&RT) volt.push('mondat-javítás');
+      if(CFG.follow) volt.push('kísérő mód');
+      JOB.stop=true; JOB.on=false;
+      try{ QSTOP=true }catch(e){}
+      try{ RT=false }catch(e){}
+      try{ JOBTS=0 }catch(e){}
+      CFG.follow=0; saveCfg();
+      try{ progShow(false); jobDotDraw() }catch(e){}
+      log('MINDEN LEÁLLÍTVA'+(volt.length?' — futott: '+volt.join(', '):' — nem futott semmi')+
+          ' · '+asrSpentTxt());
+      toast(volt.length?('leállítva: '+volt.join(', ')):'nem futott semmi — minden tiszta',6000);
+      if(n) n.textContent='Leállítva. Az elmúlt órában feltöltött hang: '+asrSpentTxt()+'.';
+    };
+    if(n&&!n.dataset.k){ n.dataset.k='1' }
+  }
   segFill($('segHap'),[[1,'be'],[0,'ki']],CFG.hap?1:0,k=>{
     /* v107: a kijelölést is újra kell rajzolni — nélküle a gomb „nem reagált" */
     CFG.hap=+k?1:0; saveCfg(); drawSet(); if(CFG.hap) buzz(20) });
