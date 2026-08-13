@@ -545,11 +545,12 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
 #zones div{position:absolute;display:flex;align-items:center;justify-content:center;
   text-align:center;padding:var(--sp3);border:1px dashed rgba(232,182,76,.45);
   background:rgba(11,10,14,.72);border-radius:var(--r2)}
-#zL{left:6px;top:34%;bottom:6px;width:20%}
-#zR{right:6px;top:34%;bottom:6px;width:20%}
-#zT{left:22%;right:22%;top:6px;height:30%}
-#zC{left:22%;right:22%;top:38%;bottom:15%}
-#zB{left:22%;right:22%;bottom:6px;height:12%}
+/* v106: a jelző-átfedés a valódi (szélesebb) zónákat mutatja */
+#zL{left:6px;top:34%;bottom:6px;width:26%}
+#zR{right:6px;top:34%;bottom:6px;width:26%}
+#zT{left:28%;right:28%;top:6px;height:30%}
+#zC{left:28%;right:28%;top:38%;bottom:15%}
+#zB{left:28%;right:28%;bottom:6px;height:12%}
 @keyframes zfade{0%{opacity:0}12%{opacity:1}75%{opacity:1}100%{opacity:0}}
 .item .q{background:none;border:0;color:var(--faint);font-family:var(--mono);
   font-size:15px;padding:6px 8px;cursor:pointer;align-self:center}
@@ -563,6 +564,31 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    OSSZEFUGGO polcnak latszik. A sav a boriton belul, alul: „hol tartok benne". */
 /* Harom-negy csempe egy sorban: EZ nezt ki polcnak. A v38-as 128px-es minimum
    telefonon ket ovriasi csempet adott, ami inkabb kartyalista volt, mint polc. */
+/* ======== v106: folytatás-csempe ======== */
+#resume{display:flex;gap:var(--sp4);align-items:center;cursor:pointer;
+  padding:var(--sp3);margin-bottom:var(--sp5);border-radius:var(--r3);
+  background:linear-gradient(135deg,rgba(232,182,76,.10),rgba(232,182,76,.02));
+  border:1px solid rgba(232,182,76,.26);-webkit-tap-highlight-color:transparent}
+#resume:active{transform:translateY(1px)}
+#resume .rsArt{position:relative;width:34%;max-width:150px;aspect-ratio:1/1;
+  flex:0 0 auto;border-radius:var(--r3);overflow:hidden;border:1px solid var(--line2);
+  background:linear-gradient(145deg,#241f2e,#12111a);
+  display:flex;align-items:center;justify-content:center;
+  box-shadow:0 10px 22px rgba(0,0,0,.45)}
+#resume .rsArt img{width:100%;height:100%;object-fit:cover;display:block}
+#resume .rsArt span{font-family:var(--mono);font-size:26px;color:var(--gold);opacity:.75}
+#resume .rsArt i{position:absolute;left:0;bottom:0;height:4px;background:var(--gold)}
+#resume .rsTxt{flex:1 1 auto;min-width:0}
+#resume .rsCap{font-family:var(--mono);font-size:11px;color:var(--gold);
+  letter-spacing:.08em;text-transform:uppercase}
+#resume .rsName{font-size:var(--t3);line-height:1.25;margin:2px 0 4px;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+#resume .rsMeta{font-family:var(--mono);font-size:11px;color:var(--txt2)}
+#resume .rsNext{font-family:var(--mono);font-size:11px;color:var(--faint);
+  margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#resume .rsGo{flex:0 0 auto;width:46px;height:46px;border-radius:50%;
+  background:var(--gold);color:#14110a;border:0;font-size:19px;cursor:pointer;
+  box-shadow:0 6px 16px rgba(232,182,76,.28)}
 #lib.shelf{display:grid;grid-template-columns:repeat(auto-fill,minmax(104px,1fr));
   gap:var(--sp5) var(--sp4)}
 #lib.shelf .item{display:none}
@@ -677,6 +703,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
   <section class="view on" id="vLib">
     <!-- v39: a POLC áll felül. A hierarchia sorrendje: amit használsz (a polc) elöl,
          amit ritkán (behúzás) utána, amit egyszer (kulcs-beállítás) a végén. -->
+    <div id="resume" class="hid"></div>
     <div class="lib" id="lib"></div>
 
     <!-- v64: MŰSOROK — kedvenc feedek, egy koppintással -->
@@ -780,6 +807,14 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
         <button data-k="atk">Atkinson</button>
       </div>
       <div class="note" id="fontNote"></div>
+      <label class="lbl">rezdülés a gombokra (haptika)</label>
+      <div class="seg" id="segHap">
+        <button data-k="1">be</button>
+        <button data-k="0">ki</button>
+      </div>
+      <div class="note">Rövid rezgés minden koppintásra — a nagyobb tettek
+        (törlés, felismerés indítása) kicsit hosszabbat adnak. Ha a telefonon
+        a rendszerszintű haptika ki van kapcsolva, ez sem érezhető.</div>
       <label class="lbl">kezelők elrejtése hallgatás közben</label>
       <div class="seg" id="segImm">
         <button data-k="5">5 mp után</button>
@@ -1121,7 +1156,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v105';
+const APP_VER='v106';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -1180,6 +1215,7 @@ var CFG=Object.assign({
   asr:'groq', asrKey:'', asrUrl:'', asrModel:'', chunkMin:5, words:1, pcm:1, vad:1, slice:'norm', hint:1,
   tr:'free', dlKey:'', clKey:'', clModel:'haiku', oaiUrl:'https://api.moonshot.ai/v1', oaiKey:'', oaiModel:'kimi-k2.6',
   kfs:1.35, font:'lit', huMode:'split', rate:1, keepAudio:1, trMode:'all', follow:0,
+  hap:1,                       /* v106: haptikus visszajelzés (rezdülés) */
   /* v102: a tanuló mód (angol szavak beszövése) kikerült — a program
      hallgatásra és olvasásra való. A folyamatos magyar nézet marad. */
   immSec:5, immTip:0, pairs:0, learn:0, weave:1, wDens:1, paged:1, shelf:1,
@@ -1187,6 +1223,26 @@ var CFG=Object.assign({
   proxy:0, proxyUrl:'https://api.allorigins.win/raw?url='
 }, J('hg_cfg',{}));
 const saveCfg=()=>store.set('hg_cfg',JSON.stringify(CFG));
+/* ======== v106: HAPTIKA ========
+   Rövid rezdülés a koppintásokra. Egyetlen, capture-fázisú kezelő adja az
+   egészet: így minden gomb megkapja, a jövőbeliek is, és egy helyen lehet
+   kikapcsolni. A hosszabb rezdülés a jelentős tetteknek jár (törlés, indítás),
+   a rövid a hétköznapi gomboknak.
+   Fontos: az Android csak akkor rezeg, ha a lap már kapott érintést — ezért
+   nincs értelme indításkor „bemelegíteni". */
+function buzz(ms){
+  if(!CFG.hap) return;
+  try{ if(navigator.vibrate) navigator.vibrate(ms||12) }catch(e){}
+}
+addEventListener('pointerdown',e=>{
+  if(!CFG.hap) return;
+  const t=e.target&&e.target.closest?e.target.closest(
+    'button,.bk,.row,.item,.seg>button,input[type=checkbox],label.lbl,#resume'):null;
+  if(!t) return;
+  /* a veszélyes / nagy tettek erősebbet kapnak — a kéz is érzi, hogy ez más */
+  const sz=(t.textContent||'').toLowerCase();
+  buzz(/törlés|törlöm|nulláról|indítás|felismerés|javítás/.test(sz)?22:11);
+},true);
 /* egyszeri átállás: a rögzített magyar sáv az új alapértelmezés a mentett
    beállításokon is; aki mást akar, a ⚙ lapon vagy a „magyar" gombbal visszavált */
 if(!CFG.huV2){ CFG.huV2=1; CFG.huMode='pin'; saveCfg(); }
@@ -5271,6 +5327,7 @@ function strip(rec){
           chaps:rec.chaps||[],done:rec.done,sen:rec.sen,pos:rec.pos||0,words:rec.words||0,
           ver:1,hasAudio:rec.hasAudio?1:0,ach:rec.ach||0,cover:rec.cover||null,
           heard:rec.heard||[],ytid:rec.ytid||null,
+          lastAt:rec.lastAt||0,        /* v106: mikor hallgattad utoljára */
           /* v100: a felirat-jelölő is menjen a mentésbe — nélküle a
              feliratmappa-szinkron minden indításnál újratöltött mindent */
           subMt:rec.subMt||0,subName:rec.subName||''};
@@ -6386,8 +6443,11 @@ document.addEventListener('click',e=>{
   e.stopPropagation(); e.preventDefault();
   const W=innerWidth||360, H=innerHeight||640;
   const x=e.clientX==null?W/2:e.clientX, y=e.clientY==null?H/2:e.clientY;
-  if(x<W*0.22){ gotoSen(CUR<=0?0:CUR-1); return }      /* bal szél: vissza egy mondat */
-  if(x>W*0.78){ gotoSen(CUR+1); return }               /* jobb szél: előre egy mondat */
+  /* v106: 22% → 28%. A régi sávot a képernyő peremén kellett eltalálni; ez
+     kényelmesen a hüvelykujj alá esik, és a középső harmad (44%) még mindig
+     elég nagy a szünet/folytatás koppintáshoz. */
+  if(x<W*0.28){ gotoSen(CUR<=0?0:CUR-1); return }      /* bal szél: vissza egy mondat */
+  if(x>W*0.72){ gotoSen(CUR+1); return }               /* jobb szél: előre egy mondat */
   /* v70: a kezelők a FELSŐ harmadra ÉS az alsó sávra koppintva is visszajönnek —
      az alsó sáv ott van, ahol a dokk lenne, tehát a kéz eleve oda nyúl. */
   if(y<H/3){ A.pause(); immWake(); return }            /* felső harmad: kezelők vissza */
@@ -6690,7 +6750,7 @@ async function folderDraw(){
     const start=()=>{ clearTimeout(nyom); nyom=setTimeout(()=>{
       nyom=0;
       if(!PICKMODE){ pickSet(true); PICKED.add(f.uri); pickDraw();
-        if(navigator.vibrate) try{ navigator.vibrate(14) }catch(e){}
+        buzz(14);
         toast('kijelölő mód — koppints a többire is',3500) }
     },450) };
     const stop=()=>{ clearTimeout(nyom); nyom=0 };
@@ -7098,6 +7158,8 @@ function setCover(rec){
   document.body.classList.toggle('hascover',!!COVURL);
 }
 async function openRec(rec,fileMaybe){
+  /* v106: a folytatás-csempéhez tudni kell, mit hallgattál utoljára */
+  rec.lastAt=Date.now();
   /* régi vagy sérült rekord ne dönthesse el az egész programot */
   rec.sen=Array.isArray(rec.sen)?rec.sen:[];
   rec.done=Array.isArray(rec.done)?rec.done:[];
@@ -8116,6 +8178,50 @@ function bkListCard(l,met,byId){
   el.querySelector('.more').onclick=e=>{ e.stopPropagation(); sheetQueue(l.id) };
   return el;
 }
+/* v106: a folytatás-csempe felépítése. Külön blokk a polc RÁCSA FELETT: a
+   rácsba nem illik bele (ott minden csempe egyforma), viszont fekvő kártyaként
+   ugyanannyi helyen több információt ad, és a hüvelykujj is könnyen eléri. */
+function drawResume(recs,byId){
+  const host=$('resume');
+  if(!host) return;
+  const jelolt=(recs||[]).filter(r=>r&&(r.lastAt||0)>0&&(r.pos||0)>5&&
+    (!r.dur||r.pos<r.dur-8)).sort((a,b)=>(b.lastAt||0)-(a.lastAt||0))[0];
+  if(!jelolt){ host.className='hid'; host.innerHTML=''; return }
+  host.className='';
+  const l=listOf(jelolt.id);
+  const kov=(()=>{
+    if(!l) return null;
+    const k=l.items.indexOf(jelolt.id);
+    for(let n=k+1;n<l.items.length;n++){ const r=byId[l.items[n]]; if(r) return r }
+    return null;
+  })();
+  const pct=jelolt.dur?Math.min(99,Math.round(jelolt.pos/jelolt.dur*100)):0;
+  const sn=jelolt.sen||[];
+  const hu=sn.length&&sn.filter(s=>s.hu).length/sn.length>=0.95;
+  const art=coverUrl(jelolt.id,jelolt.cover);
+  host.innerHTML=
+    '<div class="rsArt">'+(art?'<img alt="">':'<span>'+esc(bkIni(jelolt.name||'?'))+'</span>')+
+      '<i style="width:'+Math.max(3,pct)+'%"></i></div>'+
+    '<div class="rsTxt">'+
+      '<div class="rsCap">folytatás'+(l?' · '+esc(l.name):'')+'</div>'+
+      '<div class="rsName">'+esc(jelolt.name||'')+'</div>'+
+      '<div class="rsMeta">'+fmtT(jelolt.pos||0)+' / '+fmtT(jelolt.dur||0)+
+        ' · '+pct+'%'+(hu?' · <b class="huok">HU</b>':'')+'</div>'+
+      (kov?'<div class="rsNext">utána: '+esc(kov.name||'')+'</div>':'')+
+    '</div>'+
+    '<button class="rsGo" title="folytatás">▶</button>';
+  if(art){
+    const im=host.querySelector('img');
+    if(im){
+      im.onerror=()=>{ im.remove();
+        const s=document.createElement('span');
+        s.textContent=bkIni(jelolt.name||'?');
+        host.querySelector('.rsArt').insertBefore(s,host.querySelector('.rsArt').firstChild) };
+      im.src=art;
+    }
+  }
+  host.onclick=()=>{ buzz(16); openRecById(jelolt.id) };
+}
 async function drawLib(){
   const box=$('lib');
   let recs=[];
@@ -8125,6 +8231,11 @@ async function drawLib(){
   const byId={}; recs.forEach(r=>byId[r.id]=r);
   box.innerHTML='';
   box.classList.toggle('shelf',CFG.shelf!==0);
+  /* ======== v106: FOLYTATÁS-CSEMPE ========
+     A polc legelső dolga az legyen, amit épp hallgatsz: nagy borító, cím, hol
+     tartasz, és egy koppintás a folytatáshoz. Ha listában van, a lista neve és
+     a soron következő rész is látszik. */
+  try{ drawResume(recs,byId) }catch(e){ log('folytatás-csempe:',e) }
 
   /* ---- könyvespolc ---- */
   if(CFG.shelf!==0){
@@ -9314,6 +9425,8 @@ function drawSet(){
     CFG.paged=+k; saveCfg(); drawSet(); pgApplyBody(); pgReset(); renderHu(true) });
   segFill($('segShelf'),[[1,'könyvespolc'],[0,'lista']],CFG.shelf!==0?1:0,k=>{
     CFG.shelf=+k; saveCfg(); drawSet(); drawLib() });
+  segFill($('segHap'),[[1,'be'],[0,'ki']],CFG.hap?1:0,k=>{
+    CFG.hap=+k?1:0; saveCfg(); if(CFG.hap) buzz(18) });
   segFill($('segImm'),[[5,'5 mp után'],[10,'10 mp után'],[0,'soha']],+CFG.immSec||0,k=>{
     CFG.immSec=+k; saveCfg(); drawSet(); if(!k) immSet(false); else immArm() });
   segFill($('segHu'),[['split','alul, felezve'],['pin','gombok felett'],['hide','rejtve']],
