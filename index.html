@@ -605,6 +605,16 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
 #resume .rsBar{position:absolute;left:0;right:0;bottom:0;height:4px;
   background:rgba(0,0,0,.55)}
 #resume .rsBar i{display:block;height:100%;background:var(--gold)}
+/* ======== v113: „továbbiak" pöcök a polc alján ========
+   Széles, könnyen elérhető sáv, de vizuálisan halk: a hangsúly a csempéken és
+   a hős-kártyán van, ez csak egy ajtó. */
+#libMore{display:block;width:100%;margin:var(--sp4) 0 0;padding:12px 14px;
+  background:rgba(255,255,255,.03);border:1px solid var(--line2);
+  border-radius:var(--r2);color:var(--txt2);font-family:var(--mono);
+  font-size:var(--t1);letter-spacing:.10em;text-transform:uppercase;cursor:pointer}
+#libMore:active{background:rgba(255,255,255,.07)}
+#libMore b{color:var(--gold);font-weight:400}
+#libRest{margin-top:var(--sp4)}
 /* ======== v108: elválasztó a saját könyvtár előtt ======== */
 #libHead{display:flex;align-items:center;gap:var(--sp3);
   margin:var(--sp5) 0 var(--sp4)}
@@ -733,6 +743,8 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
     <div id="resume" class="hid"></div>
     <div id="libHead" class="hid"><span>könyvtárad</span></div>
     <div class="lib" id="lib"></div>
+    <button id="libMore" class="hid"></button>
+    <div class="lib" id="libRest" class="hid"></div>
 
     <!-- v64: MŰSOROK — kedvenc feedek, egy koppintással -->
     <div class="card" id="showCard">
@@ -1182,7 +1194,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v112';
+const APP_VER='v113';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -8348,6 +8360,13 @@ async function drawLib(){
 
   /* ---- könyvespolc ---- */
   if(CFG.shelf!==0){
+    /* v113: a polc első két sora (hat csempe) látszik, a többi a „továbbiak"
+       pöcök alatt. Az elemeket előbb összeszedjük, és csak utána osztjuk szét:
+       egy kibontott lista a saját csempéjével EGYÜTT megy, hogy ne szakadjon el
+       tőle a részek csoportja. */
+    const RESTBOX=$('libRest'), MOREBTN=$('libMore');
+    if(RESTBOX) RESTBOX.innerHTML='';
+    const elemek=[];                    /* [{csempe, extra}] */
     const ls=lists().slice().sort((a,b)=>(b.at||0)-(a.at||0));
     for(const l of ls){
       const met=l.items.map(id=>byId[id]).filter(Boolean);
@@ -8357,7 +8376,9 @@ async function drawLib(){
          kívüli felvételek — így úgy tűnt, mintha a lista „kiszórta volna a
          részeit az asztalra", pedig csak a kibontott nézet volt jelöletlen.
          (A csempék a listában is benne vannak, adat nem mozdult.) */
-      try{ box.appendChild(bkListCard(l,met,byId)) }catch(e){ log('polc-lista:',e) }
+      let csempe=null;
+      try{ csempe=bkListCard(l,met,byId) }catch(e){ log('polc-lista:',e) }
+      let extra=null;
       if(l.open){
         const grp=document.createElement('div'); grp.className='lgroup';
         const cap=document.createElement('div'); cap.className='lgcap';
@@ -8371,17 +8392,44 @@ async function drawLib(){
           try{ rack.appendChild(bkCard(r,true)) }catch(e){ log('polc-elem:',e) }
         }
         grp.appendChild(rack);
-        box.appendChild(grp);
+        extra=grp;
       }
+      if(csempe) elemek.push({csempe:csempe,extra:extra});
     }
     const kint=recs.filter(r=>!inAnyList(r.id)).sort((a,b)=>(b.added||0)-(a.added||0));
     for(const r of kint){
-      try{ box.appendChild(bkCard(r,false)) }catch(e){ log('polc-elem:',e) }
+      try{ elemek.push({csempe:bkCard(r,false),extra:null}) }catch(e){ log('polc-elem:',e) }
+    }
+    /* szétosztás: az első hat a polcra, a többi a lenyitható részbe */
+    const ELSO=6;
+    const nyit=CFG.libOpen?1:0;
+    elemek.forEach((e,i)=>{
+      const cel=(i<ELSO||!RESTBOX)?box:RESTBOX;
+      cel.appendChild(e.csempe);
+      if(e.extra) cel.appendChild(e.extra);
+    });
+    const rest=Math.max(0,elemek.length-ELSO);
+    if(MOREBTN){
+      MOREBTN.classList.toggle('hid',!rest);
+      if(rest){
+        MOREBTN.innerHTML=nyit
+          ? 'kevesebb &nbsp;▴&nbsp; <b>'+elemek.length+'</b> a könyvtárban'
+          : 'továbbiak &nbsp;▾&nbsp; <b>'+rest+'</b> · összesen <b>'+elemek.length+'</b>';
+        MOREBTN.onclick=()=>{ CFG.libOpen=nyit?0:1; saveCfg(); drawLib() };
+      }
+    }
+    if(RESTBOX){
+      RESTBOX.classList.toggle('hid',!nyit||!rest);
+      RESTBOX.classList.toggle('shelf',true);
     }
     coverSweep();
     return;
   }
 
+  /* v113: soros nézetben nincs „továbbiak" — ott a görgetés a természetes */
+  { const m=$('libMore'), rb=$('libRest');
+    if(m) m.classList.add('hid');
+    if(rb){ rb.classList.add('hid'); rb.innerHTML='' } }
   /* egy sor egy felvételhez */
   const sor=(r,sub)=>{
     const pct=r.dur?Math.round(doneSec(r.done||[])/r.dur*100):0;
