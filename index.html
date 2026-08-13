@@ -1201,7 +1201,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v115';
+const APP_VER='v116';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -6207,20 +6207,33 @@ setInterval(fillLive,5000);
    a lejátszófej előtt jár, 5 perces, csendben futó falatokban; a fordítást az
    élő pótló adja közvetlenül a fej előtt. Bekapcsolás a ⋯ „feldolgozás" menüből. */
 let FOLLOW_WARN=0;
+/* v116: egy helyen dől el, hogy a kísérő mód miért NEM indít most szeletet.
+   Üres válasz = mehet. A hívó ezt naplózza (percenként egyszer), így soha
+   többé nem lehet „szótlanul nem történik semmi". */
+function followWhy(){
+  if(!CFG.follow) return 'a mód ki van kapcsolva';
+  if(!REC) return 'nincs megnyitott felvétel';
+  if(!document.body.classList.contains('playing')) return 'nem a lejátszóban vagyunk';
+  if(JOB.on) return 'másik feldolgozás fut — annak a végét várja';
+  if('onLine' in navigator&&!navigator.onLine) return 'nincs hálózat';
+  if(!CFG.asrKey) return 'nincs felismerő-kulcs (⚙ Beállítások → Beszédfelismerés)';
+  const dur=REC.dur||A.duration||0;
+  if(!dur) return 'a felvétel hossza még nem ismert';
+  const t=A.currentTime||0;
+  let frontier=Math.max(0,t);
+  for(const iv of (REC.done||[])) if(iv[0]<=frontier+1&&iv[1]>frontier) frontier=iv[1];
+  if(frontier>=dur-1) return 'a teljes felvétel fel van dolgozva';
+  if(frontier-t>=600) return 'van elég tartalék ('+Math.round((frontier-t)/60)+' perc)';
+  return '';
+}
 async function followTick(){
   if(!CFG.follow||!REC) return;
-  /* v111: ha a mód be van kapcsolva, de valami útban van, egyszer megmondjuk —
-     eddig teljesen szótlanul nem történt semmi, és úgy tűnt, elromlott */
-  const gat=(!document.body.classList.contains('playing'))?null
-    :(JOB.on?'egy másik feldolgozás fut — annak a végét várja'
-    :(('onLine' in navigator&&!navigator.onLine)?'nincs hálózat'
-    :(!CFG.asrKey?'nincs felismerő-kulcs (⚙ Beállítások)':'')));
-  if(gat){
+  const miert=followWhy();
+  if(miert){
     if(Date.now()-FOLLOW_WARN>60000){ FOLLOW_WARN=Date.now();
-      log('kísérő mód áll: '+gat) }
+      log('kísérő mód nem indít: '+miert) }
     return;
   }
-  if(!document.body.classList.contains('playing')||JOB.on) return;
   const dur=REC.dur||A.duration||0;
   if(!dur) return;
   const plan=followPlan(REC.done,A.currentTime||0,dur);
@@ -6246,7 +6259,12 @@ async function followTick(){
   log('kísérő felismerés:',fmtT(plan[0]),'→',fmtT(plan[1]));
   runJob(REC,MED,plan[0],plan[1],{quiet:true});
 }
-setInterval(followTick,15000);
+/* v116: nyolc másodperc — a play után gyorsan lendületet vesz, és a kivétel a
+   NAPLÓBA megy, nem a konzolra (ahol nem látszik) */
+setInterval(()=>{ followTick().catch(e=>{
+  if(Date.now()-FOLLOW_WARN>60000){ FOLLOW_WARN=Date.now();
+    log('kísérő mód hiba: '+String(e&&(e.message||e)).slice(0,120)) }
+}) },8000);
 
 let hintT=0;
 function saveHint(){
@@ -6284,7 +6302,11 @@ A.addEventListener('seeked',()=>{
   if(SEEKTO>=0){ CUR=SEEKTO; SEEKTO=-1; paintCur(true); drawSeek(); return }
   CUR=-1; tick();
 });
-A.addEventListener('play',()=>{ $('pPlay').textContent='❚❚'; wake(true); mediaMeta(); immArm() });
+A.addEventListener('play',()=>{ $('pPlay').textContent='❚❚'; wake(true); mediaMeta(); immArm();
+  /* v116: a lejátszás indulása AZONNAL indítja a kísérő felismerést — eddig a
+     következő időzítőre kellett várni, és ha az elhalt, semmi sem történt */
+  if(CFG.follow) followTick().catch(e=>log('kísérő mód hiba:',e));
+});
 A.addEventListener('pause',()=>{ $('pPlay').textContent='▶'; wake(false); heardClose();
   if(REC){ REC.pos=A.currentTime; txtPut(strip(REC)).catch(()=>{}) } });
 A.addEventListener('ended',()=>{ $('pPlay').textContent='▶';
@@ -8856,9 +8878,17 @@ async function sheetProcess(){
         CFG.follow=1;
         if(CFG.trMode!=='live') CFG.trMode='live';
         saveCfg();
+        /* v116: bekapcsoláskor kiírjuk a teljes állapotot — ha valami hiányzik,
+           egyetlen naplósorból kiderül, nem kell találgatni */
+        log('kísérő mód BE · kulcs:'+(CFG.asrKey?'van':'NINCS')+
+            ' · hangfájl:'+(FILE?'bekötve':'NINCS')+
+            ' · hossz:'+fmtT(REC&&REC.dur||A.duration||0)+
+            ' · feldolgozva:'+fmtT(doneSec((REC&&REC.done)||[]))+
+            ' · lejátszó:'+(A.paused?'áll':'megy')+
+            ' · '+(followWhy()||'indulhat'));
         toast('kísérő mód be: a felismerés ~10 perccel a hallgatás előtt jár, a '+
           'fordítás menet közben készül',6000);
-        followTick();
+        followTick().catch(e=>log('kísérő mód hiba:',e));
       }};
   sheet('mit ismerjünk fel?',[kis,
     {note:'A felismerés '+asrCur().name+'-en fut. A Groq ingyenes szintje ehhez elég '+
