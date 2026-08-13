@@ -920,6 +920,28 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
       <input type="range" id="chunkMin" min="1" max="10" step="1">
       <div class="note">Egy kérésbe ennyi hang megy. <b id="vChunk"></b> — a 25 MB-os
         korlát miatt 10 percnél hosszabb szelet ritkán fér bele.</div>
+      <!-- v120: a motor beállításai -->
+      <label class="lbl">indítási kapu</label>
+      <div class="seg" id="segGate">
+        <button data-k="1">bekapcsolva</button>
+        <button data-k="0">kikapcsolva</button>
+      </div>
+      <div class="note">Bekapcsolva a hang megvárja, míg a lejátszófej előtt
+        <b id="vGate"></b> kész — felismert ÉS lefordított — szöveg összegyűlik, és
+        magától elindul, amint megvan. Így az eleje sem megy el fordítás nélkül.
+        Ha menet közben fogyna el a szöveg, a lejátszás megáll és újratölt.</div>
+      <label class="lbl">az indításhoz kellő tartalék</label>
+      <input type="range" id="gateSec" min="20" max="300" step="5">
+      <label class="lbl">kísérő tartalék (a hallgatás előtt)</label>
+      <input type="range" id="aheadMin" min="2" max="30" step="1">
+      <div class="note">Hallgatás közben a program eddig dolgozik előre:
+        <b id="vAhead"></b>. Ha a tartalék megvan, nem küld többet — a kvóta csak
+        arra megy el, amit tényleg meghallgatsz.</div>
+      <label class="lbl">óránkénti hangkeret</label>
+      <input type="range" id="quotaMin" min="20" max="180" step="5">
+      <div class="note">A Groq ingyenes szintjén a valódi korlát az óránként
+        felküldött HANGMENNYISÉG (~120 perc). A motor <b id="vQuota"></b> felett
+        magától lassít, hogy ne 429-ig tolja. Most: <b id="vSpent"></b>.</div>
       <label class="lbl">hang-előkészítés</label>
       <div class="seg" id="segPcm">
         <button data-k="1">javított (WAV)</button>
@@ -1146,6 +1168,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
   <div class="msg" id="progM"></div>
   <div class="acts">
     <button class="mini" id="progStop">szüneteltetés</button>
+    <button class="mini hid" id="progGo">indítás így is</button>
     <button class="mini hid" id="progHide">elrejtés</button>
   </div>
 </div>
@@ -1206,7 +1229,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v118';
+const APP_VER='v120';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -1264,7 +1287,13 @@ addEventListener('unhandledrejection',e=>{
 var CFG=Object.assign({
   asr:'groq', asrKey:'', asrUrl:'', asrModel:'', chunkMin:5, words:1, pcm:1, vad:1, slice:'norm', hint:1,
   tr:'free', dlKey:'', clKey:'', clModel:'haiku', oaiUrl:'https://api.moonshot.ai/v1', oaiKey:'', oaiModel:'kimi-k2.6',
-  kfs:1.35, font:'lit', huMode:'split', rate:1, keepAudio:1, trMode:'all', follow:0,
+  kfs:1.35, font:'lit', huMode:'split', rate:1, keepAudio:1, trMode:'all', follow:1,
+  /* v120 — a motor beállításai (mind percben / másodpercben) */
+  gate:1,           /* indítási kapu: amíg nincs kész szöveg a fej előtt, nem indul a hang */
+  gateSec:75,       /* mennyi kész (felismert ÉS lefordított) szöveg kell az indításhoz */
+  aheadMin:10,      /* mennyi tartalékot tartson a kísérő a lejátszófej előtt */
+  trAheadMin:6,     /* a fordítás ennyi perccel a fej előtt járjon */
+  quotaMin:100,     /* óránként ennyi PERC hangot küldünk fel legfeljebb (Groq ingyenes: ~120) */
   hap:1,                       /* v106: haptikus visszajelzés (rezdülés) */
   /* v102: a tanuló mód (angol szavak beszövése) kikerült — a program
      hallgatásra és olvasásra való. A folyamatos magyar nézet marad. */
@@ -1302,6 +1331,10 @@ if(!CFG.huV3){ CFG.huV3=1; CFG.huMode=(CFG.huMode==='hide')?'hide':'split'; save
 /* v105: aki a régi „fent" módban maradt, a felezett nézetre kerül (a „fent"
    helyét a teljes képernyős magyar vette át) */
 if(CFG.huMode==='pin'){ CFG.huMode='split'; saveCfg(); }
+/* v120: az új motor a kísérő móddal és az indítási kapuval együtt kel életre —
+   a régi beállításokon is egyszer bekapcsoljuk, mert ez az alapértelmezett
+   használat (nyomsz egy play-t, és minden magától történik) */
+if(!CFG.motorV1){ CFG.motorV1=1; CFG.follow=1; CFG.gate=1; saveCfg(); }
 var spend=Object.assign({asrSec:0,tin:0,tout:0,calls:0},J('hg_spend',{}));
 const saveSpend=()=>store.set('hg_spend',JSON.stringify(spend));
 var cache=J('hg_cache',{});        /* angol mondat -> magyar */
@@ -2537,7 +2570,19 @@ function asrSpentTxt(){
   return Math.round(s/60)+' perc hang az elmúlt órában'+
     (kov?(' · a legrégebbi tétel '+kov+' perc múlva évül el'):'');
 }
-async function asrCall(blob,fileName,secs,hintPrev,temp,opts){
+/* ══════════ v120: EGYSZERRE EGY FELISMERŐ-KÉRÉS ══════════
+   A régi rendszer öt helyről küldhetett párhuzamosan; ettől lett a kvóta
+   kiszámíthatatlan és a 429 megjósolhatatlan. A zár a LEGALSÓ szinten fogja
+   meg: bárki hívja is, a kérések egymás után mennek. Ez akkor is igaz marad,
+   ha valaki később új hívóhelyet ír. */
+let ASRLANC=Promise.resolve();
+function asrCall(){
+  const a=arguments;
+  const p=ASRLANC.then(()=>asrCallRaw.apply(null,a));
+  ASRLANC=p.then(()=>{},()=>{});
+  return p;
+}
+async function asrCallRaw(blob,fileName,secs,hintPrev,temp,opts){
   if(!CFG.asrKey) throw new Error('nincs megadva a felismerő kulcsa (⚙ Beállítások)');
   const url=asrUrl(); if(!url) throw new Error('nincs megadva a felismerő végpontja');
   opts=opts||{};
@@ -3077,7 +3122,15 @@ function sheetRetr(gi){
    vesszőnél elvágott angol részlet alatt sem csonka a magyar — és mivel a részek
    alatt a magyar nem változik, több idő is jut elolvasni. */
 const huKey=s=>s.full||s.en;
-async function fillHu(list,onStep,stopFn){
+/* ugyanez a fordításra: a kísérő, a kötegelt és a kézi újrafordítás sem
+   futhat egymásra — a gyorstár és a kvóta így marad kiszámítható */
+let TRLANC=Promise.resolve();
+function fillHu(list,onStep,stopFn){
+  const p=TRLANC.then(()=>fillHuRaw(list,onStep,stopFn));
+  TRLANC=p.then(()=>{},()=>{});
+  return p;
+}
+async function fillHuRaw(list,onStep,stopFn){
   const keys=[], seen={};
   for(const s of list){ const k=huKey(s); if(!seen[k]&&cache[k]==null){ seen[k]=1; keys.push(k) } }
   for(let i=0;i<keys.length;i+=10){
@@ -3138,19 +3191,6 @@ async function fillPairs(list,onStep,stopFn){
     await sleep(120);
   }
   return n;
-}
-
-/* Kísérő mód terve: a lejátszófejtől előre nézve meddig folytonos a felismert
-   sáv; ha a ráhagyás 10 percnél kevesebb, a következő ~5 perces falat [a,b]. */
-function followPlan(done,t,dur,ahead,chunk){
-  ahead=ahead||600; chunk=chunk||300;
-  let frontier=Math.max(0,t);
-  for(const iv of done){
-    if(iv[0]<=frontier+1&&iv[1]>frontier) frontier=iv[1];
-  }
-  if(frontier>=dur-1) return null;
-  if(frontier-t>=ahead) return null;
-  return [frontier, Math.min(dur, frontier+chunk)];
 }
 
 /* ======== [5b] szókincsbank ========
@@ -3265,6 +3305,38 @@ const bankStat=()=>{
 
 /* ============ [6] futószalag ============ */
 const JOB={on:false,stop:false,id:null};
+/* ══════════ v120: A MOTOR ÁLLAPOTA — egyetlen igazságforrás ══════════
+   Nincs több rejtett állapot: aki tudni akarja, dolgozik-e a program és min,
+   ezt az egy objektumot olvassa. A JOB innentől CSAK a műhely kézi menetei
+   (runPass / runHoles / runFix / textDoctor) zárja; a napi felismerés-fordítás
+   a MOTOR sorában megy. */
+const PRI={kapu:0, huEl:1, asrEl:2, huKez:4, asrKez:5, sor:7};
+const MOTOR={
+  sor:[],            /* a feladatok — {id,k,rec,a,b,pri,cim,tr,kis,hint} */
+  fut:false,         /* él-e a munkás ciklus */
+  gen:0,             /* generáció: az őrszem ezzel léptet ki egy beragadt ciklust */
+  feladat:null,      /* az ÉPP futó feladat, vagy null */
+  eletjel:0,         /* utolsó életjel (ms) — ebből tudja az őrszem, hogy él */
+  varasIg:0,         /* eddig várunk (429 / kvótakímélés) */
+  szunet:false,      /* kézi szünet */
+  stop:false,
+  miert:'',          /* MIÉRT nem fut most — egy mondatban, a panelra */
+  hiba:'',
+  hibaSzam:{},       /* recId -> egymás utáni hibák */
+  kihagy:{},         /* recId -> miért esett ki */
+  kesz:0,            /* ebben a menetben feldolgozott szeletek */
+  futGen:0,          /* melyik generáció tartja a „fut" jelzést */
+  fg:false,          /* fut-e az előtér-szolgáltatás (Android) */
+  /* A kifelé menő három művelet egy helyen, nevesítve. Ettől a motor útja
+     végigmérhető (a jsdom-tesztek ezeket cserélik ki), és ha egyszer másik
+     felismerőre váltunk, itt az egyetlen hely, ahol nyúlni kell hozzá. */
+  hiv:{
+    asr:function(){ return asrCall.apply(null,arguments) },
+    vag:function(){ return cutSmart.apply(null,arguments) },
+    media:function(rec){ return motorMedia(rec) }
+  }
+};
+const GATE={on:false, mit:'', ig:0};   /* indítási kapu állapota */
 function progShow(on){ $('prog').classList.toggle('on',!!on) }
 let JOBPCT=0;
 /* v115: az utolsó életjel ideje. A futó munka minden lépésnél (és minden
@@ -3287,8 +3359,11 @@ function progSet(pct,title,msg,stopLabel){
    szám is elmagyarázza magát. */
 function jobDotDraw(msg){
   const d=$('jobDot'); if(!d) return;
-  d.classList.toggle('hid',!JOB.on);
-  if(!JOB.on) return;
+  /* v120: a pötty a kézi menetet ÉS a motort is tükrözi — ha bármi dolgozik
+     (vagy sorban áll), látszik; ha semmi, eltűnik */
+  const aktiv=JOB.on||(typeof MOTOR!=='undefined'&&(MOTOR.fut||MOTOR.sor.length>0));
+  d.classList.toggle('hid',!aktiv);
+  if(!aktiv) return;
   const varakozik=typeof msg==='string'&&/kvót|429|vár/.test(msg);
   d.classList.toggle('wait',varakozik);
   d.querySelector('span').textContent=varakozik
@@ -3308,8 +3383,9 @@ function jobWatch(){
   const perc=Math.round((Date.now()-JOBTS)/60000);
   JOB.on=false; JOB.stop=true; JOBTS=0;
   try{ progShow(false); jobDotDraw() }catch(e){}
-  log('a futó feldolgozás '+perc+' perce nem adott életjelet — a jelzést elengedtem, '+
-      'új feldolgozás (és a kísérő mód) újra indulhat');
+  log('a műhely kézi menete '+perc+' perce nem adott életjelet — a jelzést elengedtem, '+
+      'a motor újra dolgozhat');
+  try{ motorEbreszt() }catch(e){}
   toast('egy félbeszakadt feldolgozás jelzését elengedtem — indíthatsz újat',6000);
 }
 setInterval(jobWatch,30000);
@@ -5105,303 +5181,593 @@ async function runFix(rec,M){
    A képernyőzár alatti futást a natív előtér-szolgáltatás adja (MAPPA.fgOn:
    állandó értesítés + részleges ébrenlét-zár); böngészőben, ahol ez nincs,
    a sor addig fut, amíg a lap nyitva van. */
-let QSTOP=false;
-/* v91: a sor a LISTA lapjáról indul, és a lista részeit kapja meg — a kész
-   (már felismert) részeket a hívó szűri ki, itt csak biztonsági háló van.
-   Hallgatás közben is futhat: a lejátszó a felismeréstől független. */
-async function runQueue(recsIn,cimke){
-  if(JOB.on){ toast('már fut egy feldolgozás'); return }
-  if(!MAPPA){ toast('az előfelismeréshez a mappás alkalmazás (APK) kell'); return }
-  const todo=(recsIn||[]).filter(r=>r&&!(r.sen||[]).length);
-  if(!todo.length) return toast('ebben a listában minden résznek van már szövege',5000);
-  if(!confirm('Előfelismerés — '+(cimke||'lista')+': '+todo.length+
-    ' szöveg nélküli rész, egymás után, angol szövegre. A kész részeket kihagyja.\n\n'+
-    'Képernyőzár alatt és hallgatás közben is fut (értesítés jelzi). A fordítás '+
-    'most NEM készül el — az akkor jön, amikor az epizódot hallgatod. Indulhat?')) return;
-  QSTOP=false;
-  let fg=false;
-  if(MAPPA.fgOn){
-    try{ await MAPPA.fgOn({title:'előfelismerés: '+todo.length+' rész'}); fg=true;
-      log('ébrentartás be — a felismerés képernyőzár alatt is fut'); }
-    catch(e){ log('ébrentartás nem indult ('+String(e&&(e.message||e)).slice(0,60)+
-      ') — régi APK? A sor csak nyitott képernyőnél fut biztosan.'); }
+/* ══════════════════════════════════════════════════════════════════════════
+   v120 — A MOTOR: EGY MUNKÁS, EGY SOR
+   ──────────────────────────────────────────────────────────────────────────
+   Miért lett újraírva: v43–v118 között öt folyamat (runJob, runFix, runQueue,
+   followTick, fillLive) versengett ugyanazon a globális állapoton. Ha bármelyik
+   elhalt — a WebView elaltatta, egy rossz szelet 400-at kapott, a mentés
+   megbotlott —, a „fut egy munka" jelzés bent ragadt, és onnantól MINDEN más
+   csendben félreállt. A felhasználó annyit látott: nem indul el semmi.
+
+   Az új rend három mondatban:
+     1. Mindenki csak FELADATOT TESZ A SORBA (kísérő, kapu, kézi gomb, sorozat).
+        Futtatni egyedül a munkás futtat, egyszerre egy kérést.
+     2. A feladat a szelet határán megszakítható: a munkás egy szeletet dolgoz
+        fel, majd a MARADÉKKAL visszateszi a sorba. Így a sürgős (amit épp
+        hallgatsz) mindig megelőzi a háttérmunkát, várakozás nélkül.
+     3. Beragadás fogalmilag nem létezhet: az őrszem az életjelet nézi, és
+        generációváltással kilépteti a halott ciklust. Minden kivétel a
+        NAPLÓBA megy, soha csak a konzolra.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+let MOTOR_ID=0;
+const MOTOR_HOLT_MS=3*60*1000;      /* ennyi mozdulatlanság után halottnak vesszük */
+const MOTOR_SZELET=()=>Math.max(60,(CFG.chunkMin||5)*60);
+const MOTOR_MINSZ=20;               /* ennél rövidebb maradékot nem küldünk fel */
+
+/* a t időponttól előre meddig folytonos a felismert sáv */
+function frontOf(done,t){
+  let f=Math.max(0,t||0);
+  for(const iv of (done||[])) if(iv[0]<=f+1&&iv[1]>f) f=iv[1];
+  return f;
+}
+/* hány mondat vár még fordításra egy idősávban */
+function huHiany(rec,a,b){
+  let n=0;
+  for(const s of (rec.sen||[])) if(!s.hu&&s.b>a&&s.a<b) n++;
+  return n;
+}
+function motorNev(t){
+  return (t.cim||'')+' · '+fmtT(t.a)+' → '+fmtT(t.b);
+}
+/* ---- a sor kezelése ---- */
+function motorPush(t){
+  if(!t||!t.rec) return null;
+  if(MOTOR.kihagy[t.rec]&&t.pri>PRI.kapu) return null;   /* kiesett felvétel */
+  /* dedup: ugyanarra a felvételre ugyanolyan, már lefedett feladat ne kerüljön
+     be kétszer — a kísérő másodpercenként „kérné", ha hagynánk */
+  for(const x of MOTOR.sor){
+    if(x.k===t.k&&x.rec===t.rec&&x.a<=t.a+1&&x.b>=t.b-1){
+      if(t.pri<x.pri) x.pri=t.pri;                        /* sürgősebb lett */
+      if(t.tr) x.tr=1;
+      return x;
+    }
   }
-  log('sorozat-előfelismerés indul: '+todo.length+' rész');
-  let kesz=0;
+  t.id=++MOTOR_ID;
+  MOTOR.sor.push(t);
+  motorEbreszt();
+  return t;
+}
+function motorDrop(fn){
+  const elott=MOTOR.sor.length;
+  MOTOR.sor=MOTOR.sor.filter(x=>!fn(x));
+  return elott-MOTOR.sor.length;
+}
+function motorNext(){
+  if(!MOTOR.sor.length) return null;
+  MOTOR.sor.sort((x,y)=>(x.pri-y.pri)||(x.id-y.id));
+  return MOTOR.sor.shift();
+}
+function motorEbreszt(){
+  if(MOTOR.fut||MOTOR.stop) return;
+  motorLoop().catch(e=>log('MOTOR: a munkás kivétellel állt le: '+
+    String(e&&(e.message||e)).slice(0,140)));
+}
+function motorStop(ok){
+  const n=MOTOR.sor.length;
+  MOTOR.sor=[]; MOTOR.stop=true; MOTOR.gen++; MOTOR.feladat=null;
+  MOTOR.futGen=0; MOTOR.fut=false;
+  MOTOR.varasIg=0; GATE.on=false;
+  log('MOTOR: leállítva'+(ok?' ('+ok+')':'')+(n?' — '+n+' feladat eldobva':''));
+  motorFgOff();
+  setTimeout(()=>{ MOTOR.stop=false },400);   /* a következő indítás mehessen */
+  motorPanel();
+}
+/* ---- Android: előtér-szolgáltatás, amíg van munka ---- */
+async function motorFgOn(){
+  if(MOTOR.fg||!MAPPA||!MAPPA.fgOn) return;
+  try{ await MAPPA.fgOn({title:'felismerés / fordítás'}); MOTOR.fg=true;
+    log('MOTOR: ébrentartás be — képernyőzár alatt is dolgozik'); }
+  catch(e){ log('MOTOR: az ébrentartás nem indult ('+
+    String(e&&(e.message||e)).slice(0,60)+') — régi APK?') }
+}
+async function motorFgOff(){
+  if(!MOTOR.fg||!MAPPA||!MAPPA.fgOff) { MOTOR.fg=false; return }
+  try{ await MAPPA.fgOff({}) }catch(e){}
+  MOTOR.fg=false;
+}
+/* ---- a felvétel és a hang előkerítése ---- */
+async function motorRec(id){
+  if(REC&&REC.id===id) return REC;              /* a nyitott felvétel ÉLŐ példánya */
+  const r=await txtGet(id);
+  if(!r) throw Object.assign(new Error('a felvétel nincs meg a tárolóban'),{vegzetes:1});
+  if(!r.sen) r.sen=[]; if(!r.done) r.done=[];
+  return r;
+}
+const MMED={id:'',M:null};
+async function motorMedia(rec){
+  if(REC&&REC.id===rec.id){
+    if(!MED){
+      if(!FILE&&MAPPA){
+        try{ const f=await folderFind(rec); if(f) await safAttach(rec,f) }catch(e){}
+      }
+      if(FILE){ try{ await prepMedia() }catch(e){} }
+    }
+    if(MED) return MED;
+  }
+  if(MMED.id===rec.id&&MMED.M) return MMED.M;
+  if(!MAPPA) throw Object.assign(new Error('a hangfájl nincs bekötve'),{vegzetes:1});
+  const f=await folderFind(rec);
+  if(!f) throw Object.assign(new Error('a hangfájl nincs meg a mappában'),{vegzetes:1});
+  const M=await openMedia(safFile(f),()=>{});
+  MMED.id=rec.id; MMED.M=M;
+  if(!(rec.dur>1)&&M.dur>1){ rec.dur=M.dur; await save(rec) }
+  return M;
+}
+/* ---- kvótatudatosság: az ÓRÁS hangmennyiség a valódi korlát ---- */
+function motorKvota(kell){
+  const keret=Math.max(10,(CFG.quotaMin||100))*60;
+  const ment=asrSpent();
+  if(ment+kell<=keret) return 0;
+  /* mennyit kell várni, míg a legrégebbi tétel elévül */
+  const kov=ASRSEC.length?Math.max(5000,ASRSEC[0][0]+3600000-Date.now()):60000;
+  return Math.min(kov,5*60000);
+}
+/* ══════════ EGY ASR-LÉPÉS: PONTOSAN EGY SZELET ══════════
+   Visszatérés: true = a feladatnak van még dolga (menjen vissza a sorba),
+   false = ez a feladat kész (vagy értelmét vesztette). */
+async function motorAsr(t,rec){
+  const dur=rec.dur||0;
+  const to=Math.min(t.b,dur||t.b);
+  if(!CFG.asrKey){ MOTOR.miert='nincs felismerő-kulcs (⚙ Beállítások)'; return false }
+  /* kísérő feladat: ha közben összejött a tartalék, vagy megállt a hang, kész */
+  if(t.kis){
+    if(!REC||REC.id!==rec.id) return false;
+    if(A.paused&&!GATE.on) return false;
+    const most=A.currentTime||0;
+    if(frontOf(rec.done,most)-most>=(CFG.aheadMin||10)*60) return false;
+  }
+  const gap=nextGap(rec.done,t.a,to);
+  if(!gap) return false;
+  const t0=gap[0];
+  /* a felvétel végén (vagy egy apró lyukban) maradt csonkot nem küldjük fel:
+     üres dekódolás → 400 → a régi rendszerben ez állította meg az egészet */
+  if(gap[1]-gap[0]<MOTOR_MINSZ){
+    rec.done=mergeDone(rec.done,gap[0],gap[1]); await save(rec);
+    t.a=gap[1];
+    return nextGap(rec.done,t.a,to)?true:false;
+  }
+  const t1=Math.min(gap[1],t0+MOTOR_SZELET());
+  const var_=motorKvota(t1-t0);
+  if(var_){
+    MOTOR.varasIg=Date.now()+var_;
+    log('MOTOR: kvótakímélés — '+Math.round(var_/1000)+' s szünet ('+asrSpentTxt()+')');
+    return true;
+  }
+  const M=await MOTOR.hiv.media(rec);
+  const ov=Math.max(t.a,t0-(t0>t.a?1.5:0));       /* átfedés, hogy ne törjön mondat */
+  motorSet(t,rec,'felismerés',fmtT(t0)+' → '+fmtT(t1));
+  let piece;
+  try{ piece=await MOTOR.hiv.vag(M,ov,t1,true) }
+  catch(e){ throw new Error('a hang szeletelése nem sikerült: '+String(e&&(e.message||e)).slice(0,80)) }
+  if(piece.blob.size>24*1024*1024){
+    log('MOTOR: a '+fmtT(t0)+'–'+fmtT(t1)+' szelet '+fmtMB(piece.blob.size)+
+        ' — a felismerő 25 MB-ig fogad; állítsd kisebbre a szeletméretet (⚙)');
+    rec.done=mergeDone(rec.done,t0,t1); await save(rec); t.a=t1; return true;
+  }
+  let d=null;
   try{
-    for(let k=0;k<todo.length;k++){
-      if(QSTOP||JOB.stop) break;
-      const rec=todo[k];
-      log('előfelismerés '+(k+1)+'/'+todo.length+': '+String(rec.name||'').slice(0,60));
-      let M=null;
-      try{
-        const f=await folderFind(rec);
-        if(!f) throw new Error('a hangfájl nincs meg a mappában');
-        M=await openMedia(safFile(f),()=>{});
-        if(!(rec.dur>1)&&M.dur>1){ rec.dur=M.dur; await save(rec) }
-      }catch(e){
-        log('előfelismerés — kihagyva ('+String(rec.name||'').slice(0,40)+'): '+
-            String(e&&(e.message||e)).slice(0,80));
+    d=await MOTOR.hiv.asr(piece.blob,piece.name,piece.t1-piece.t0,CFG.hint===0?'':(t.hint||''));
+  }catch(e){
+    /* ══ EGY ROSSZ SZELET NEM ÁLLÍT MEG SEMMIT ══
+       400 = a felismerő nem tudott mit kezdeni a hanggal (üres, csonka,
+       formátumhiba). Lezárjuk késznek, és megyünk tovább; a régi rendszerben
+       ilyenkor minden újraindítás ugyanide futott. */
+    if(e&&(e.status===400||e.status===413||/empty|too short|decode|invalid file/i.test(String(e.message||'')))){
+      log('MOTOR: a '+fmtT(t0)+'–'+fmtT(t1)+' szelet nem ment át ('+
+          (e.status||'?')+': '+String(e.message||'').slice(0,60)+') — átugorva');
+      rec.done=mergeDone(rec.done,t0,t1); await save(rec); t.a=t1; return true;
+    }
+    throw e;
+  }
+  /* írásjelezés még a tagolás előtt (csak ha van nyelvi modell és tényleg kell) */
+  if(llmOk()){ try{ await punctAsr(d) }catch(e){} }
+  let sen=toSentences(d,piece.t0);
+  const cap=Math.min(piece.t1,rec.dur||piece.t1);
+  sen=sen.filter(s=>s.a<cap+0.5).map(s=>{
+    s.b=Math.min(s.b,cap);
+    if(s.w) s.w=s.w.map(x=>Math.min(x,cap));
+    return s;
+  });
+  /* a szelet végén félbehagyott mondat a következő körben, átfedésből jön —
+     de ha a vágás csendhatárra esett, ott mondat nem törhetett ketté */
+  if(!(piece.pcm&&piece.quiet)&&t1<to-1&&sen.length>1&&
+     !/[.!?"'”’)\]]$/.test(sen[sen.length-1].en)) sen.pop();
+  const added=mergeSen(rec,sen);
+  rec.done=mergeDone(rec.done,piece.t0,Math.min(t1,piece.t1));
+  rec.words=CFG.words?1:(rec.words||0);
+  t.hint=sen.length?sen[sen.length-1].en:t.hint;
+  t.a=Math.min(t1,piece.t1);
+  await save(rec);
+  MOTOR.kesz++;
+  if(REC&&REC.id===rec.id) renderKara(true);
+  /* fordítás: amit felismertünk, azt rögtön kérjük magyarul — a kísérőnél és a
+     „mindent előre" módban is; a sorozat-előfelismerés viszont csak angolt gyűjt */
+  if(t.tr) motorPush({k:'tr',rec:rec.id,a:piece.t0,b:Math.min(t1,piece.t1)+0.5,
+    pri:t.pri===PRI.kapu?PRI.kapu:(t.kis?PRI.huEl:PRI.huKez),cim:'fordítás'});
+  return !!nextGap(rec.done,t.a,to);
+}
+/* ══════════ EGY FORDÍTÁSI LÉPÉS: EGY KORTY (10 mondat) ══════════ */
+async function motorTr(t,rec){
+  const need=[];
+  for(const s of (rec.sen||[])){
+    if(!s.hu&&s.b>t.a-0.01&&s.a<t.b){ need.push(s); if(need.length>=10) break }
+  }
+  if(!need.length) return false;
+  motorSet(t,rec,'fordítás',need.length+' mondat · '+fmtT(need[0].a));
+  const n=await fillHu(need,null,()=>MOTOR.stop);
+  if(cacheDirty) saveCache();
+  if(n){
+    await save(rec);
+    t.ures=0;
+    if(REC&&REC.id===rec.id){
+      renderKara(true);
+      try{ if(huFlowOn()){ huBuild(); renderHu(true) }else updHuBar() }catch(e){}
+    }
+  }else{
+    /* nem jött fordítás (hálózat, motor, üres válasz): kétszer még próbáljuk,
+       aztán a feladat kiesik — végtelen körözés soha */
+    t.ures=(t.ures||0)+1;
+    if(t.ures>=3){
+      log('MOTOR: a fordítás háromszor üresen tért vissza ('+fmtT(t.a)+' → '+fmtT(t.b)+
+          ') — a feladat kimarad, a sor megy tovább');
+      return false;
+    }
+    MOTOR.varasIg=Date.now()+8000;
+  }
+  return true;
+}
+/* ---- a panel/pötty tápja ---- */
+function motorSet(t,rec,cim,uz){
+  MOTOR.eletjel=Date.now();
+  MOTOR.hiba='';
+  const nev=String((rec&&rec.name)||'').slice(0,42);
+  const span=Math.max(1,(t.b||0)-(t.kezdA!=null?t.kezdA:0));
+  MOTOR.cim=cim; MOTOR.uzenet=uz;
+  MOTOR.nev=nev;
+  motorPanel();
+}
+/* ══════════ A MUNKÁS ══════════ */
+async function motorLoop(){
+  if(MOTOR.fut) return;
+  const gen=++MOTOR.gen;
+  /* A „fut" jelzés egy GENERÁCIÓHOZ tartozik. Ha közben (őrszem, leállítás)
+     generációt váltunk, a régi ciklus kilép — és mivel a jelzést csak az
+     teheti le, aki fel is tette, nem maradhat bent egy halott ciklus után.
+     Pontosan ez a beragadás volt a v118-ig tartó bajok forrása. */
+  MOTOR.futGen=gen; MOTOR.fut=true; MOTOR.stop=false;
+  MOTOR.eletjel=Date.now(); MOTOR.kesz=0;
+  try{
+    while(gen===MOTOR.gen&&!MOTOR.stop){
+      MOTOR.eletjel=Date.now();
+      /* a műhely kézi menete (rendbetétel, pótlás, újrafordítás) elsőbbséget
+         élvez: amíg az fut, a motor félreáll — de nem hal meg, csak vár */
+      if(JOB.on||RT){ MOTOR.miert='a műhely kézi menete fut — megvárom'; await sleep(2000); continue }
+      if(MOTOR.szunet){ MOTOR.miert='szüneteltetve'; await sleep(1000); continue }
+      if(MOTOR.varasIg>Date.now()){
+        MOTOR.miert='várakozás '+Math.ceil((MOTOR.varasIg-Date.now())/1000)+' s (kvóta)';
+        motorPanel();
+        await sleep(Math.min(2000,MOTOR.varasIg-Date.now()));
         continue;
       }
-      await runJob(rec,M,0,rec.dur||M.dur||0);
-      if(JOB.stop){ QSTOP=true; break }
-      kesz++;
+      const t=motorNext();
+      if(!t) break;
+      MOTOR.feladat=t; MOTOR.miert=''; MOTOR.eletjel=Date.now();
+      if(t.kezdA==null) t.kezdA=t.a;
+      await motorFgOn();
+      let ujra=false;
+      try{
+        const rec=await motorRec(t.rec);
+        ujra=(t.k==='tr')?await motorTr(t,rec):await motorAsr(t,rec);
+        MOTOR.hibaSzam[t.rec]=0;
+      }catch(e){
+        ujra=motorHiba(t,e);
+      }
+      MOTOR.feladat=null;
+      if(ujra&&!MOTOR.stop&&gen===MOTOR.gen){ MOTOR.sor.push(t) }
+      else if(!ujra&&t.k==='asr'&&t.veg){ try{ t.veg() }catch(e){} }
+      motorPanel();
+      await sleep(40);
     }
   }finally{
-    if(fg&&MAPPA.fgOff){ try{ await MAPPA.fgOff({}) }catch(e){} }
+    if(MOTOR.futGen===gen){          /* csak a SAJÁT jelzésemet teszem le */
+      MOTOR.futGen=0; MOTOR.fut=false; MOTOR.feladat=null;
+      if(!MOTOR.sor.length){ MOTOR.miert=''; await motorFgOff();
+        if(MOTOR.kesz) { try{ drawCost(); drawLib() }catch(e){} } }
+      motorPanel();
+      /* ha közben érkezett új feladat, azonnal megyünk tovább */
+      if(MOTOR.sor.length&&!MOTOR.stop) setTimeout(motorEbreszt,120);
+    }
   }
-  log('sorozat-előfelismerés vége: '+kesz+'/'+todo.length+' rész kész'+
-      (QSTOP?' (megállítva)':''));
-  toast('előfelismerés: '+kesz+' rész kész'+(QSTOP?' — megállítva':''),7000);
-  drawLib();
 }
-async function runJob(rec,M,from,to,opts){
-  opts=opts||{};
-  if(JOB.on){ toast('már fut egy feldolgozás'); return }
-  JOB.on=true; JOB.stop=false; JOB.id=rec.id; JOBTS=Date.now();
-  if(!opts.quiet){
-    progShow(true); $('progHide').classList.add('hid'); $('progStop').textContent='szüneteltetés';
+/* ══════════ HIBAKEZELÉS — a sor SOHA nem áll meg egy hibától ══════════ */
+function motorHiba(t,e){
+  MOTOR.eletjel=Date.now();
+  const st=(e&&e.status)||0, uz=String((e&&(e.message||e))||'').slice(0,150);
+  MOTOR.hiba=uz;
+  if(st===401||st===403){
+    log('MOTOR: a felismerő elutasította a kulcsot ('+st+'): '+uz);
+    toast('a felismerő elutasította a kulcsot — ⚙ Beállítások → Beszédfelismerés',7000);
+    motorStop('hibás kulcs');
+    return false;
   }
-  const step=Math.max(60,CFG.chunkMin*60);
-  const span=to-from;
-  let hint='';
-  const qcAll=[];   /* v83: a felismerő minőség-jelei alapján gyanús szakaszok */
+  if(st===429||(e&&e.retry)){
+    const w=Math.min(300,Math.max(10,Math.round(+(e&&e.retry)||30)));
+    MOTOR.varasIg=Date.now()+w*1000;
+    log('MOTOR: kvóta (429) — '+w+' s kivárás, a feladat megmarad · '+asrSpentTxt());
+    return true;                       /* feladatot SOHA nem dobunk el 429-re */
+  }
+  if(e&&e.vegzetes){
+    MOTOR.kihagy[t.rec]=uz;
+    const n=motorDrop(x=>x.rec===t.rec);
+    log('MOTOR: „'+String(t.cim||'').slice(0,30)+'" kimarad — '+uz+
+        (n?' ('+n+' további feladata is)':''));
+    return false;
+  }
+  const db=(MOTOR.hibaSzam[t.rec]=(MOTOR.hibaSzam[t.rec]||0)+1);
+  log('MOTOR: hiba ('+db+'/3) '+motorNev(t)+' — '+uz);
+  if(db>=3){
+    MOTOR.kihagy[t.rec]=uz;
+    const n=motorDrop(x=>x.rec===t.rec);
+    log('MOTOR: három hiba egymás után ezen a felvételen — kihagyom, a sor megy tovább'+
+        (n?' ('+n+' feladata eldobva)':''));
+    return false;
+  }
+  MOTOR.varasIg=Date.now()+Math.min(60000,db*8000);
+  return true;
+}
+/* ══════════ ŐRSZEM — beragadás fogalmilag ne létezhessen ══════════ */
+setInterval(()=>{
   try{
-    while(!JOB.stop){
-      const gap=nextGap(rec.done,from,to);
-      if(!gap) break;
-      const t0=gap[0], t1=Math.min(gap[1],t0+step);
-      const ov=Math.max(from,t0-(t0>from?1.5:0));      /* átfedés, hogy ne törjön mondat */
-      const pct=Math.min(99,(doneSec(rec.done.filter(iv=>iv[1]>from&&iv[0]<to))/span)*100);
-      progSet(pct,'felismerés',fmtT(t0)+' → '+fmtT(t1)+' · '+rec.sen.length+' mondat');
-      let piece;
-      try{ piece=await cutSmart(M,ov,t1,true) }
-      catch(e){ throw new Error('a hang szeletelése nem sikerült: '+e.message) }
-      if(piece.blob.size>24*1024*1024)
-        throw new Error('a szelet '+fmtMB(piece.blob.size)+', a felismerő 25 MB-ig fogad — '+
-          'állítsd kisebbre a szeletméretet a beállításokban');
-      let d=null, err=null, sen=null;
-      /* ======== v86: PRECÍZ MÓD ========
-         A már dekódolt szeletet a Silero térképe alapján ≤28 mp-es,
-         beszédhatáros ablakokra bontjuk, és azokat kérdezzük egyenként.
-         Több kérés (a v84-es ütemező kordában tartja), de a 30 mp-es
-         dekódolási ablakon belül maradva a modellnek nincs hova ugrania. */
-      let precW=null;
-      if(CFG.slice==='prec'&&piece.pcm&&piece.f32&&await vadEnsure()){
-        try{ precW=await precWindows(piece) }
-        catch(e){ log('precíz szeletelés hiba: '+String(e&&(e.message||e)).slice(0,60)+
-                      ' — normál szelet megy'); precW=null }
-      }
-      if(precW){
-        log('precíz mód: '+precW.length+' beszédhatáros ablak ('+
-            fmtT(t0)+' → '+fmtT(piece.t1)+')');
-        sen=[];
-        for(let wi=0;wi<precW.length&&!JOB.stop;wi++){
-          const rel=precW[wi];
-          const wBlob=wavF32(piece.f32.subarray(
-            Math.round(rel[0]*PCM_SR),Math.round(rel[1]*PCM_SR)));
-          progSet(pct,'felismerés (precíz)',
-            fmtT(piece.fT0+rel[0])+' → '+fmtT(piece.fT0+rel[1])+' · '+
-            (wi+1)+'/'+precW.length+' · '+rec.sen.length+' mondat');
-          let dw=null;
-          for(let att=0;att<3&&!JOB.stop;att++){
-            try{ dw=await asrCall(wBlob,'r.wav',rel[1]-rel[0],
-                   CFG.hint===0?'':hint); break }
-            catch(e){
-              log('felismerő hiba',e.status||'',String(e.message).slice(0,120));
-              if(e.status===401||e.status===403) throw e;
-              const wait=e.retry?Math.min(60,e.retry):(att+1)*6;
-              progSet(pct,'felismerés (precíz)','várakozás '+wait+' s');
-              for(let s=0;s<wait&&!JOB.stop;s++) await sleep(1000);
-            }
-          }
-          if(!dw){
-            qcAll.push([piece.fT0+rel[0],piece.fT0+rel[1]]);
-            log('precíz mód: a '+fmtT(piece.fT0+rel[0])+'–'+fmtT(piece.fT0+rel[1])+
-                ' ablak nem ment át — pótlásra jelölve');
-            continue;
-          }
-          if(llmOk()){
-            const np=await punctAsr(dw);
-            if(np) log('írásjelezés: '+np+' szó jelölve (precíz ablak)');
-          }
-          const ws=toSentences(dw,piece.fT0+rel[0]);
-          sen.push(...ws);
-          if(ws.length) hint=ws[ws.length-1].en;
-          /* a QC-vizsgálat közös d-t vár: a szegmenseket a szelet idejére toljuk */
-          if(!d) d={segments:[]};
-          for(const g of (dw.segments||[])) d.segments.push({
-            compression_ratio:g.compression_ratio, avg_logprob:g.avg_logprob,
-            no_speech_prob:g.no_speech_prob,
-            start:(+g.start||0)+rel[0]+(piece.fT0-piece.t0),
-            end:(+g.end||0)+rel[0]+(piece.fT0-piece.t0)});
-        }
-        if(JOB.stop) break;
-        if(!d) d={segments:[]};
-      }else{
-      for(let attempt=0;attempt<3&&!JOB.stop;attempt++){
-        try{ d=await asrCall(piece.blob,piece.name,piece.t1-piece.t0,
-               CFG.hint===0?'':hint); err=null; break }
-        catch(e){
-          err=e; log('felismerő hiba',e.status||'',String(e.message).slice(0,150));
-          if(e.status===401||e.status===403) break;
-          const wait=e.retry?Math.min(60,e.retry):(attempt+1)*6;
-          progSet(pct,'felismerés','várakozás '+wait+' s ('+e.message.slice(0,60)+')');
-          for(let s=0;s<wait&&!JOB.stop;s++) await sleep(1000);
-        }
-      }
-      if(JOB.stop) break;
-      if(err) throw err;
-      /* v52: írásjelezés a nyers válaszon, MÉG a tagolás előtt — csak akkor
-         hív API-t, ha a szeletből tényleg hiányoznak az írásjelek */
-      if(llmOk()){
-        const np=await punctAsr(d);
-        if(np) log('írásjelezés: '+np+' szó jelölve a tagolás előtt ('+fmtT(t0)+' → '+fmtT(t1)+')');
-      }
-      sen=toSentences(d,piece.t0);
-      }
-      /* a felismerő időbélyege néha túllóg a szeleten; a lejátszó ilyenkor
-         hibás mondatnál állna, ezért a szelet határára szorítjuk */
-      const cap=Math.min(piece.t1,rec.dur||piece.t1);
-      sen=sen.filter(s=>s.a<cap+0.5).map(s=>{
-        s.b=Math.min(s.b,cap);
-        if(s.w) s.w=s.w.map(x=>Math.min(x,cap));
-        return s;
-      });
-      /* ======== v83: MINŐSÉG-JELEK a válaszból ========
-         A verbose_json szegmensenként megmondja, mennyire volt biztos a dekóder
-         (avg_logprob), gyanús-e az ismétlési hurok (compression_ratio), és
-         mennyire hitte csendnek a szakaszt (no_speech_prob). Eddig ezt
-         eldobtuk — pedig pont ez mutatja meg, HOL hagyott ki. A gyanús
-         szakaszokat a futam végi automatikus pótló kör újrakérdezi. */
-      for(const g of (d.segments||[])){
-        const cr=+g.compression_ratio||0,
-              lp=(g.avg_logprob==null?0:+g.avg_logprob),
-              ns=+g.no_speech_prob||0,
-              ga=piece.t0+(+g.start||0), gb=piece.t0+(+g.end||0);
-        if(gb-ga<0.8) continue;
-        if(cr>2.4||lp<-1.1||(ns>0.5&&lp<-0.6))
-          qcAll.push([Math.max(0,ga-0.8),Math.min(rec.dur||gb+0.8,gb+0.8)]);
-      }
-      /* ======== v85: BESZÉDTÉRKÉP-ELLENŐRZÉS ========
-         Ahol a mondatok közt ≥1,4 s lyuk van, ott megnézzük a lyuk HANGJÁT:
-         ha a Silero ≥0,9 s beszédet lát benne, az bizonyított kihagyás —
-         nem heurisztika, hanem a hang tanúsága. Ezek a futam végi pótló
-         körben célzottan újra lesznek kérdezve. */
-      if(piece.f32&&await vadEnsure()){
-        try{
-          const cap2=Math.min(piece.t1,rec.dur||piece.t1);
-          const lyuk=[]; let cur=t0+0.3;
-          const benn=sen.filter(s=>s.b>t0&&s.a<cap2).sort((x,y)=>x.a-y.a);
-          for(const s of benn){ if(s.a-cur>=1.4) lyuk.push([cur,s.a]); cur=Math.max(cur,s.b) }
-          if(cap2-0.3-cur>=1.4) lyuk.push([cur,cap2-0.3]);
-          let vTal=0;
-          for(const g of lyuk.slice(0,12)){
-            const i0=Math.max(0,Math.round((g[0]-piece.fT0)*PCM_SR)),
-                  i1b=Math.min(piece.f32.length,Math.round((g[1]-piece.fT0)*PCM_SR));
-            if(i1b-i0<PCM_SR) continue;
-            const map=await speechMap(piece.f32.subarray(i0,i1b));
-            for(const m of map){ if(m[1]-m[0]>=0.9){
-              qcAll.push([Math.max(0,g[0]+m[0]-0.4),
-                          Math.min(rec.dur||1e9,g[0]+m[1]+0.4)]);
-              vTal++; } }
-          }
-          if(vTal) log('beszédtérkép: '+vTal+' beszédszakasz leirat nélkül ('+
-            fmtT(t0)+' → '+fmtT(t1)+') — pótlásra jelölve');
-        }catch(e){ log('beszédtérkép hiba: '+String(e&&(e.message||e)).slice(0,60)) }
-      }
-      if(piece.f32) piece.f32=null;                    /* memória vissza */
-      /* a szelet végén félbehagyott mondat a következő körben, átfedésből jön.
-         v83: ha a szelet vége csendhatárra lett igazítva, ott mondat nem törhet
-         ketté — az írásjel hiánya ilyenkor a felismerő pongyolasága, nem
-         csonkaság, és az eldobás VESZTESÉG volna (a régi 1,5 mp-es átfedés
-         csak az utolsó másfél másodpercet hozta volna vissza). */
-      if(!(piece.pcm&&piece.quiet)&&
-         t1<to-1&&sen.length>1&&!/[.!?"'”’)\]]$/.test(sen[sen.length-1].en)) sen.pop();
-      const added=mergeSen(rec,sen);
-      rec.done=mergeDone(rec.done,piece.t0,Math.min(t1,piece.t1));
-      rec.words=CFG.words?1:(rec.words||0);
-      hint=sen.length?sen[sen.length-1].en:hint;
-      await save(rec);                                /* minden szelet után mentünk */
-      renderKara(true);
-      /* fordítás rögtön, hogy hallgatható legyen, ami már megvan */
-      if(CFG.trMode==='live'){
-        /* menet közben mód: a tömeges előre-fordítás kimarad — a magyar a
-           lejátszás előtt ~10 mondattal, kis kortyokban készül, így csak az
-           fogy (token, kvóta), amit tényleg meghallgatsz */
-        progSet(pct,'fordítás menet közben','a magyar a lejátszás előtt készül el');
-      }else{
-        const need=rec.sen.filter(s=>!s.hu);
-        if(need.length){
-          progSet(pct,'fordítás',need.length+' új mondat');
-          await fillHu(need,()=>renderKara(true),()=>JOB.stop);
-          if(cacheDirty) saveCache();
-          await save(rec);
-        }
-      }
-      if(opts.oneShot||opts.quiet) break;
-    }
-    if(opts.quiet){
-      progShow(false);
-    }else{
-      const left=nextGap(rec.done,from,to);
-      if(!left){ progSet(100,'kész',rec.sen.length+' mondat felismerve'); }
-      else{ progSet(Math.min(99,(doneSec(rec.done)/span)*100),'szüneteltetve',
-        'a hátralévő rész: '+fmtT(left[0])+' → '+fmtT(to)); }
-      $('progStop').textContent='folytatás';
-      $('progHide').classList.remove('hid');
-    }
-  }catch(e){
-    log('feldolgozás megállt:',e);
-    if(opts.quiet){
-      progShow(false);
-      toast('a kísérő felismerés elakadt: '+String(e.message).slice(0,80)+
-        ' — részletek a ⚙ hibanaplóban',6000);
-    }else{
-      progSet(Math.min(99,(doneSec(rec.done)/span)*100),'megállt',e.message.slice(0,180));
-      $('progStop').textContent='újra';
-      $('progHide').classList.remove('hid');
-    }
-  }finally{
-    JOB.on=false;
-    if(cacheDirty) saveCache();
-    await save(rec);
-    drawCost(); drawLib();
+    if(!MOTOR.fut) { if(MOTOR.sor.length&&!MOTOR.stop) motorEbreszt(); return }
+    if(!MOTOR.eletjel){ MOTOR.eletjel=Date.now(); return }
+    if(Date.now()-MOTOR.eletjel<MOTOR_HOLT_MS) return;
+    const perc=Math.round((Date.now()-MOTOR.eletjel)/60000);
+    log('MOTOR: a munkás '+perc+' perce nem adott életjelet — újraindítom '+
+        '(a sorban '+MOTOR.sor.length+' feladat vár)');
+    if(MOTOR.feladat) MOTOR.sor.push(MOTOR.feladat);
+    MOTOR.gen++;                       /* a halott ciklus a következő körben kilép */
+    MOTOR.futGen=0; MOTOR.fut=false; MOTOR.feladat=null; MOTOR.varasIg=0;
+    setTimeout(motorEbreszt,200);
+  }catch(e){}
+},20000);
+
+/* ══════════════════════════════════════════════════════════════════════════
+   KÍSÉRŐ — a look-ahead szabályozó
+   Amit hallgatsz, annak mindig legyen ~10 perc tartaléka: felismerve ÉS
+   lefordítva. Ha megvan, NEM küldünk többet (kvótát kímélünk). A vezérlés
+   egyetlen helyen dől el, és ha nem indul, egy mondatban megmondja, miért.
+   ══════════════════════════════════════════════════════════════════════════ */
+let KIS_WARN=0;
+function kiseroWhy(){
+  if(!CFG.follow) return 'a kísérő mód ki van kapcsolva';
+  if(!REC) return 'nincs megnyitott felvétel';
+  if(A.paused&&!GATE.on) return 'a lejátszás áll';
+  if('onLine' in navigator&&!navigator.onLine) return 'nincs hálózat';
+  const dur=REC.dur||A.duration||0;
+  if(!dur) return 'a felvétel hossza még nem ismert';
+  return '';
+}
+function motorKisero(){
+  const miert=kiseroWhy();
+  if(miert){
+    const csendes=/^(a kísérő mód|nincs megnyitott|a lejátszás áll)/.test(miert);
+    if(!csendes&&Date.now()-KIS_WARN>60000){ KIS_WARN=Date.now(); log('kísérő: '+miert) }
+    return;
   }
-  /* ======== v82: A PÓTLÁS MAGÁTÓL LEFUT AZ ELSŐ FELISMERÉS UTÁN ========
-     Eddig két gomb volt: felismerés, majd kézzel a „kimaradt mondatok
-     pótlása". Mostantól a TELJES felvételen végigért felismerés után a
-     lyuk-pótlás magától elindul — egy gombnyomás, kész, lyukmentes eredmény.
-     Részleges menetnél (innentől / kísérő mód) nem fut, ott zavarna. */
-  if(!opts.quiet&&!opts.oneShot&&!JOB.stop&&from<=1&&to>=(rec.dur||to)-1){
-    const left=nextGap(rec.done,from,to);
-    if(!left){
-      let gs=senMissing(rec,GAP_MIN);
-      if(qcAll.length){
-        const all=gs.concat(qcAll).sort((x,y)=>x[0]-y[0]); const m=[];
-        for(const r of all){ const l=m[m.length-1];
-          if(l&&r[0]<=l[1]+0.6) l[1]=Math.max(l[1],r[1]); else m.push([r[0],r[1]]) }
-        if(m.length>40) log('pótlás: túl sok gyanús folt ('+m.length+') — az első 40 fut');
-        gs=m.slice(0,40);
-        log('pótlás: +'+qcAll.length+' bizonytalan szegmens a felismerő '+
-            'minőség-jelei (avg_logprob / compression_ratio / no_speech) alapján');
-      }
-      if(gs.length){
-        log('felismerés kész — a kimaradt mondatok pótlása magától indul ('+
-            gs.length+' folt, '+fmtT(gapSec(gs))+')');
-        const o=passOpts();
-        if(o.model) log('pótlás a pontos modellel:',o.model);
-        await runHoles(rec,M,gs,'kimaradt mondatok',o);
-      }
-      /* v87: a teljes felismerés után a turbo keresztellenőrzés is magától
-         lefut — másik modell, más hibákkal: amit a fő menet átugrott, azt ez
-         nagy eséllyel meghallja, és a pontos modell pótolja. Nem kell külön
-         gombot nyomni; fillérekbe kerül (turbo: 0,04 $/óra). */
-      if(!JOB.stop) await runCross(rec,M);
-    }
+  const t=A.currentTime||0, dur=REC.dur||A.duration||0;
+  /* 1) FELISMERÉS: kell-e tartalék? */
+  const fr=frontOf(REC.done,t);
+  if(CFG.asrKey&&fr<dur-1&&fr-t<(CFG.aheadMin||10)*60){
+    motorPush({k:'asr',rec:REC.id,a:fr,b:dur,pri:PRI.asrEl,tr:1,kis:1,cim:'kísérő felismerés'});
+  }
+  /* 2) FORDÍTÁS: a fej előtti percekben ne maradjon magyar nélküli mondat.
+     A tartomány a lejátszófejjel mozog, ezért a régi kísérő-fordítást
+     eldobjuk és frisset teszünk be — nem halmozunk. */
+  const hig=t+(CFG.trAheadMin||6)*60;
+  if(huHiany(REC,t-2,hig)){
+    motorDrop(x=>x.k==='tr'&&x.pri===PRI.huEl&&x.rec===REC.id&&
+      !(MOTOR.feladat&&MOTOR.feladat.id===x.id));
+    motorPush({k:'tr',rec:REC.id,a:Math.max(0,t-2),b:hig,pri:PRI.huEl,cim:'kísérő fordítás'});
   }
 }
+setInterval(()=>{ try{ motorKisero() }catch(e){
+  if(Date.now()-KIS_WARN>60000){ KIS_WARN=Date.now();
+    log('kísérő hiba: '+String(e&&(e.message||e)).slice(0,120)) }
+} },4000);
+
+/* ══════════════════════════════════════════════════════════════════════════
+   INDÍTÁSI KAPU — nem indul a hang, amíg nincs mit olvasni
+   „Ha egyből elindul, akkor az eleje még fordítás nélkül van." Ezért a play
+   először tartalékot épít: a lejátszófejtől ~75 másodpercnyi szöveg felismerve
+   ÉS lefordítva. Amint megvan, a hang MAGÁTÓL elindul. Ugyanez véd menet
+   közben is: ha a lejátszás beérné a kész szöveg végét, megáll és újratölt —
+   ahogy egy videólejátszó pufferel.
+   ══════════════════════════════════════════════════════════════════════════ */
+/* A burkolást nem itt, hanem az A lejátszó-objektum megszületése után kötjük be
+   (motorKapuBekot) — ez a fájlban lentebb van, és a betöltési sorrend számít. */
+let _playRaw=null;
+function motorKapuBekot(){
+  if(_playRaw||typeof A==='undefined'||!A) return;
+  _playRaw=A.play.bind(A);
+  /* minden play ezen megy át — a gombé, a fejhallgatóé, a listáé is */
+  A.play=function(){
+    if(GATE.on) return Promise.resolve();
+    const mit=gateMi();
+    if(!mit) return _playRaw();
+    gateIndit(mit);
+    return Promise.resolve();
+  };
+}
+function gateCel(t,dur){ return Math.min(dur||1e9,(t||0)+(CFG.gateSec||75)) }
+/* '' = mehet a lejátszás; egyébként az ok, amiért még nem */
+function gateMi(t){
+  if(!CFG.gate||!REC) return '';
+  const dur=REC.dur||A.duration||0;
+  if(!dur) return '';
+  t=(t==null?(A.currentTime||0):t);
+  if(t>=dur-8) return '';                       /* a legvégén ne kapuzzunk */
+  const cel=gateCel(t,dur);
+  const fr=frontOf(REC.done,t);
+  if(fr<cel-1){
+    /* ha felismerni sem tudunk (nincs kulcs, nincs hang, nincs net), nem
+       tartjuk vissza a hallgatást — a kapu segít, nem akadályoz */
+    if(!CFG.asrKey||('onLine' in navigator&&!navigator.onLine)) return '';
+    return 'felismerés';
+  }
+  if(huHiany(REC,t,cel)&&engReady(CFG.tr)!==false) return 'fordítás';
+  return '';
+}
+function gateIndit(mit){
+  if(!REC) return;
+  const t=A.currentTime||0, dur=REC.dur||A.duration||0;
+  const cel=gateCel(t,dur);
+  GATE.on=true; GATE.mit=mit; GATE.ig=cel;
+  log('kapu: az indulás előtt tartalékot építünk — '+fmtT(t)+' → '+fmtT(cel)+
+      ' ('+mit+')');
+  if(CFG.asrKey&&frontOf(REC.done,t)<cel-1)
+    motorPush({k:'asr',rec:REC.id,a:frontOf(REC.done,t),b:Math.min(dur,cel+30),
+      pri:PRI.kapu,tr:1,cim:'előkészítés'});
+  motorPush({k:'tr',rec:REC.id,a:Math.max(0,t-1),b:cel,pri:PRI.kapu,cim:'előkészítés'});
+  motorPanel();
+}
+/* a kapu figyelője: amint megvan a tartalék, magától indul a hang */
+setInterval(()=>{
+  try{
+    if(GATE.on){
+      if(!REC){ GATE.on=false; motorPanel(); return }
+      if(!gateMi()){
+        GATE.on=false;
+        log('kapu: megvan a tartalék — indul a lejátszás');
+        motorPanel();
+        _playRaw().catch(e=>toast('nem indul: '+String(e&&(e.message||e)).slice(0,60)));
+      }
+      return;
+    }
+    /* menet közbeni kifutás: ha a hang beérné a kész szöveget, megállunk és
+       újratöltünk. 8 mp ráhagyás, hogy egy pillanatnyi hiány ne szakítson meg. */
+    if(CFG.gate&&REC&&!A.paused){
+      const t=A.currentTime||0, dur=REC.dur||A.duration||0;
+      if(dur&&t<dur-10){
+        const fr=frontOf(REC.done,t);
+        const kifut=(fr<t+8&&CFG.asrKey)||huHiany(REC,t,t+15)>=2;
+        if(kifut){
+          A.pause();
+          log('kapu: a szöveg elfogyott a fej előtt ('+fmtT(t)+') — szünet, újratöltés');
+          toast('a szöveg elfogyott — újratöltés, aztán magától folytatódik',4000);
+          gateIndit(fr<t+8?'felismerés':'fordítás');
+        }
+      }
+    }
+  }catch(e){}
+},1000);
+
+/* ══════════════════════════════════════════════════════════════════════════
+   INDÍTÓK — mindenki csak a sorba tesz
+   ══════════════════════════════════════════════════════════════════════════ */
+/* teljes feldolgozás: felismerés elejétől a végéig (fordítással vagy anélkül) */
+function motorTeljes(rec,tr,a,b){
+  rec=rec||REC; if(!rec) return;
+  const dur=rec.dur||A.duration||0;
+  const t=motorPush({k:'asr',rec:rec.id,a:a||0,b:(b||dur||1e9),pri:PRI.asrKez,
+    tr:tr?1:0,cim:'felismerés'});
+  delete MOTOR.kihagy[rec.id];
+  if(t) toast(tr?'felismerés + fordítás a sorban — a haladás a felső sávon látszik'
+                :'felismerés a sorban',4500);
+  motorPanel();
+}
+/* elejétől a végéig fordító: minden magyar nélküli mondat, sorban */
+function motorForditMind(rec){
+  rec=rec||REC; if(!rec) return;
+  const n=(rec.sen||[]).filter(s=>!s.hu).length;
+  if(!n) return toast('minden mondat le van fordítva');
+  delete MOTOR.kihagy[rec.id];
+  motorPush({k:'tr',rec:rec.id,a:0,b:(rec.dur||1e9)+60,pri:PRI.huKez,
+    cim:'fordítás elejétől a végéig'});
+  log('fordítás elejétől a végéig: '+n+' mondat a sorban ('+
+      String(rec.name||'').slice(0,40)+')');
+  toast(n+' mondat fordítása a sorban',4000);
+  motorPanel();
+}
+/* sorozat-előfelismerés: egy lista szöveg nélküli részei, háttérben */
+let QSTOP=false;
+async function runQueue(recsIn,cimke){
+  const todo=(recsIn||[]).filter(r=>r&&!(r.sen||[]).length);
+  if(!todo.length) return toast('ebben a listában minden résznek van már szövege',5000);
+  if(!MAPPA) return toast('az előfelismeréshez a mappás alkalmazás (APK) kell',5000);
+  if(!confirm('Előfelismerés — '+(cimke||'lista')+': '+todo.length+
+    ' szöveg nélküli rész kerül a sorba, egymás után, angol szövegre.\n\n'+
+    'Képernyőzár alatt és hallgatás közben is fut; amit épp hallgatsz, az '+
+    'mindig megelőzi. A fordítás akkor készül, amikor az epizódot hallgatod. '+
+    'Indulhat?')) return;
+  QSTOP=false;
+  for(const r of todo){
+    delete MOTOR.kihagy[r.id];
+    motorPush({k:'asr',rec:r.id,a:0,b:r.dur||1e9,pri:PRI.sor,tr:0,
+      cim:'előfelismerés · '+String(r.name||'').slice(0,30)});
+  }
+  log('sorozat-előfelismerés: '+todo.length+' rész a sorban');
+  toast(todo.length+' rész a sorban — a haladás a felső sávon látszik',6000);
+  motorPanel();
+}
+/* ══════════ KIJELZŐ: egy helyen, hogy mi fut és mennyi van hátra ══════════ */
+function motorPanel(){
+  try{
+    if(JOB.on||RT){ return }            /* a műhely kézi menete maga írja a panelt */
+    const t=MOTOR.feladat;
+    if(GATE.on){
+      const most=A.currentTime||0;
+      const cel=GATE.ig||gateCel(most,REC&&REC.dur||0);
+      const fr=frontOf((REC&&REC.done)||[],most);
+      const kesz=Math.max(0,Math.min(1,(fr-most)/Math.max(1,cel-most)));
+      progShow(true);
+      $('progHide').classList.add('hid');
+      progSet(Math.max(3,kesz*100),'előkészítés',
+        'a hang akkor indul, ha megvan az első '+Math.round((cel-most))+' másodperc '+
+        'szövege — most tart: '+fmtT(fr)+(MOTOR.miert?' · '+MOTOR.miert:''),'megszakítás');
+      $('progGo').classList.remove('hid');
+      return;
+    }
+    $('progGo').classList.add('hid');
+    if(!t&&!MOTOR.sor.length){
+      if(!MOTOR.fut){ progShow(false); jobDotDraw() }
+      return;
+    }
+    progShow(true); $('progHide').classList.remove('hid');
+    $('progStop').textContent='minden leállítása';
+    const sor=MOTOR.sor.length;
+    if(!t){
+      progSet(null,'sorban',(MOTOR.miert||'indul')+(sor?' · '+sor+' feladat vár':''));
+      return;
+    }
+    const teljes=Math.max(1,(t.b||0)-(t.kezdA||0));
+    const kesz=Math.max(0,Math.min(1,((t.a||0)-(t.kezdA||0))/teljes));
+    progSet(Math.max(2,kesz*100),(MOTOR.cim||t.cim||'feldolgozás'),
+      (MOTOR.nev?MOTOR.nev+' · ':'')+(MOTOR.uzenet||'')+
+      (MOTOR.miert?' · '+MOTOR.miert:'')+(sor?' · +'+sor+' a sorban':''));
+  }catch(e){}
+}
+setInterval(()=>{ try{ motorPanel() }catch(e){} },1500);
+/* egy mondat, ami megmondja, mi a helyzet — a naplóba és a beállítás-lapra */
+function motorAllapot(){
+  if(GATE.on) return 'előkészítés (a hang a tartalékra vár)';
+  if(MOTOR.feladat) return (MOTOR.cim||'dolgozik')+' — '+motorNev(MOTOR.feladat)+
+    (MOTOR.sor.length?' · +'+MOTOR.sor.length+' a sorban':'');
+  if(MOTOR.sor.length) return MOTOR.sor.length+' feladat vár'+(MOTOR.miert?' · '+MOTOR.miert:'');
+  return 'a motor áll — nincs feladat'+(kiseroWhy()?' · kísérő: '+kiseroWhy():'');
+}
+
 /* A mentés SOHA nem állíthatja meg a felismerést: ami már megvan, azért fizettünk.
    Ha a tároló megtelt vagy nem elérhető, jelezzük, de a munka fut tovább, és a
    memóriában lévő szöveg hallgatható marad. */
@@ -5465,6 +5831,7 @@ const A={
 };
 ['play','pause','seeked','ended','loadedmetadata','durationchange','error','stalled']
   .forEach(t=>AEL.addEventListener(t,()=>{ if(!YTP) A.emit(t) }));
+motorKapuBekot();      /* v120: innentől minden lejátszás-indítás a kapun megy át */
 let REC=null, MED=null, MURL='', CUR=-1, WIN=[0,0], follow=true, followTimer=0,
     huFollow=true, huFollowTimer=0, SEEKTO=-1,
     loopA=null, loopB=null, dragging=false, lastSpoken=-1;
@@ -6176,7 +6543,7 @@ function tick(){
     CUR=i;
     if(i<WIN[0]+4||i>=WIN[1]-4) renderKara(false); else paintCur(false);
     if(huFlowOn()) renderHu(false);
-    saveHint();    if(CFG.trMode==='live') fillLive();
+    saveHint();    try{ motorKisero() }catch(e){}
   }
   heardTick(t); flashTick();
   /* a görgetés minden ciklusban finomodik — ettől lesz a magyar folyam tempója
@@ -6200,103 +6567,12 @@ function tick(){
   }
   drawSeek();
 }
-/* Fordítás menet közben: a lejátszófej előtt járunk. „Menet közben" módban ez
-   a FŐ fordító — szűk ablakkal (~12 mondat), szünetben is dolgozik, hogy mire
-   odaér a lejátszás, a magyar ott legyen. „Előre az egészet" módban csak pótló:
-   a kimaradtakat szedi össze játszás közben, tágabb ablakban. */
-let FILLING=false, fillDirty=0;
-async function fillLive(){
-  if(!REC||FILLING) return;
-  /* Menet közben módban a feldolgozás ALATT is fordítunk — pont akkor hallgat
-     az ember, amikor a felismerés még fut. „Előre az egészet" módban viszont a
-     futó feldolgozás maga fordít, ilyenkor nem duplázunk rá. */
-  if(JOB.on&&CFG.trMode!=='live') return;
-  if('onLine' in navigator&&!navigator.onLine) return;
-  const live=CFG.trMode==='live';
-  if(!live&&A.paused) return;
-  const from=Math.max(0,CUR);
-  const part=REC.sen.slice(from,from+(live?12:40)).filter(s=>!s.hu).slice(0,10);
-  if(!part.length) return;
-  FILLING=true;
-  try{
-    const n=await fillHu(part);
-    if(n){ fillDirty+=n; renderKara(true); if(cacheDirty) saveCache();
-      if(fillDirty>=30){ fillDirty=0; await save(REC) } }
-  }catch(e){}
-  FILLING=false;
-}
-setInterval(fillLive,5000);
-
-/* Kísérő mód: a felismerés a hallgatás ütemében megy — a Groq mindig ~10 perccel
-   a lejátszófej előtt jár, 5 perces, csendben futó falatokban; a fordítást az
-   élő pótló adja közvetlenül a fej előtt. Bekapcsolás a ⋯ „feldolgozás" menüből. */
-let FOLLOW_WARN=0;
-/* v116: egy helyen dől el, hogy a kísérő mód miért NEM indít most szeletet.
-   Üres válasz = mehet. A hívó ezt naplózza (percenként egyszer), így soha
-   többé nem lehet „szótlanul nem történik semmi". */
-function followWhy(){
-  if(!CFG.follow) return 'a mód ki van kapcsolva';
-  if(!REC) return 'nincs megnyitott felvétel';
-  /* v118: a MUNKA a lejátszáshoz kötődik, nem a képernyőhöz. Ha megy a hang,
-     dolgozzon — akkor is, ha közben a könyvtárat vagy a naplót nézed. */
-  if(A.paused) return 'a lejátszás áll';
-  if(JOB.on) return 'másik feldolgozás fut — annak a végét várja';
-  if('onLine' in navigator&&!navigator.onLine) return 'nincs hálózat';
-  if(!CFG.asrKey) return 'nincs felismerő-kulcs (⚙ Beállítások → Beszédfelismerés)';
-  const dur=REC.dur||A.duration||0;
-  if(!dur) return 'a felvétel hossza még nem ismert';
-  const t=A.currentTime||0;
-  let frontier=Math.max(0,t);
-  for(const iv of (REC.done||[])) if(iv[0]<=frontier+1&&iv[1]>frontier) frontier=iv[1];
-  if(frontier>=dur-1) return 'a teljes felvétel fel van dolgozva';
-  if(frontier-t>=600) return 'van elég tartalék ('+Math.round((frontier-t)/60)+' perc)';
-  return '';
-}
-async function followTick(){
-  if(!CFG.follow||!REC) return;
-  const miert=followWhy();
-  if(miert){
-    /* v118: a normális állapotokat (áll a lejátszás, minden kész, van elég
-       tartalék) NEM naplózzuk — csak a valódi akadályokat, különben a napló
-       tele lesz olyasmivel, ami nem hiba */
-    const csendes=['a lejátszás áll','a teljes felvétel fel van dolgozva',
-                   'a mód ki van kapcsolva','nincs megnyitott felvétel'];
-    const valodi=csendes.indexOf(miert)<0&&!/^van elég tartalék/.test(miert);
-    if(valodi&&Date.now()-FOLLOW_WARN>60000){ FOLLOW_WARN=Date.now();
-      log('kísérő mód nem indít: '+miert) }
-    return;
-  }
-  const dur=REC.dur||A.duration||0;
-  if(!dur) return;
-  const plan=followPlan(REC.done,A.currentTime||0,dur);
-  if(!plan) return;
-  if(!MED){
-    /* v111: előbb a mappa — a kísérő mód eddig csendben elhalt, ha a
-       fájl-hivatkozás nem volt beállítva, holott a fájl megvan */
-    if(!FILE&&MAPPA){
-      try{
-        const f=await folderFind(REC);
-        if(f){ await safAttach(REC,f); log('kísérő: a hangfájl a mappából bekötve') }
-      }catch(e){}
-    }
-    if(!FILE){
-      if(Date.now()-FOLLOW_WARN>60000){ FOLLOW_WARN=Date.now();
-        log('kísérő mód: nincs meg a hangfájl — a könyvtárban húzd be újra');
-        askAudio(REC) }                  /* v62: a hiány helyén a megoldás */
-      return;
-    }
-    try{ await prepMedia() }catch(e){ log('kísérő: előkészítés:',e); return }
-    if(!MED) return;
-  }
-  log('kísérő felismerés:',fmtT(plan[0]),'→',fmtT(plan[1]));
-  runJob(REC,MED,plan[0],plan[1],{quiet:true});
-}
-/* v116: nyolc másodperc — a play után gyorsan lendületet vesz, és a kivétel a
-   NAPLÓBA megy, nem a konzolra (ahol nem látszik) */
-setInterval(()=>{ followTick().catch(e=>{
-  if(Date.now()-FOLLOW_WARN>60000){ FOLLOW_WARN=Date.now();
-    log('kísérő mód hiba: '+String(e&&(e.message||e)).slice(0,120)) }
-}) },8000);
+/* v120: a menet közbeni fordítást és a kísérő felismerést a MOTOR végzi
+   (motorKisero + a sor). Ami itt maradt, az csak a régi hívóhelyek horga —
+   külön folyamat, külön időzítő, külön állapot innentől nincs. */
+function fillLive(){ try{ motorKisero() }catch(e){} }
+function followTick(){ try{ motorKisero() }catch(e){} return Promise.resolve() }
+function followWhy(){ return kiseroWhy() }
 
 let hintT=0;
 function saveHint(){
@@ -6335,9 +6611,9 @@ A.addEventListener('seeked',()=>{
   CUR=-1; tick();
 });
 A.addEventListener('play',()=>{ $('pPlay').textContent='❚❚'; wake(true); mediaMeta(); immArm();
-  /* v116: a lejátszás indulása AZONNAL indítja a kísérő felismerést — eddig a
-     következő időzítőre kellett várni, és ha az elhalt, semmi sem történt */
-  if(CFG.follow) followTick().catch(e=>log('kísérő mód hiba:',e));
+  /* v120: a lejátszás indulása azonnal megpiszkálja a kísérőt — a sor pedig
+     magától gondoskodik róla, hogy egyszerre csak egy kérés menjen */
+  try{ motorKisero() }catch(e){ log('kísérő hiba:',e) }
 });
 A.addEventListener('pause',()=>{ $('pPlay').textContent='▶'; wake(false); heardClose();
   if(REC){ REC.pos=A.currentTime; txtPut(strip(REC)).catch(()=>{}) } });
@@ -7778,6 +8054,22 @@ async function sheetQueue(lid){
       ' szöveg nélküli rész (a kész '+(l.items.length-varo.length)+'-t kihagyja)',
       pri:1,fn:()=>{ closeSheet(); runQueue(varo,l.name) }});
   }
+  /* v120: a lista teljes fordítása — a gépen készült SRT-k behúzása után ez az
+     egyetlen hátralévő lépés, és eddig nem volt rá egyetlen gomb sem */
+  (function(){
+    const fordit=l.items.map(id=>byId[id]).filter(r=>r&&(r.sen||[]).some(x=>!x.hu));
+    if(!fordit.length) return;
+    const db=fordit.reduce((n,r)=>n+r.sen.filter(x=>!x.hu).length,0);
+    items.push({t:'fordítás elejétől a végéig: '+fordit.length+' rész · '+db+' mondat',
+      pri:1,fn:()=>{ closeSheet();
+        for(const r of fordit){ delete MOTOR.kihagy[r.id];
+          motorPush({k:'tr',rec:r.id,a:0,b:(r.dur||1e9)+60,pri:PRI.huKez,
+            cim:'fordítás · '+String(r.name||'').slice(0,30)}) }
+        log('lista-fordítás: '+fordit.length+' rész, '+db+' mondat a sorban');
+        toast(fordit.length+' rész fordítása a sorban',5000);
+        motorPanel();
+      }});
+  })();
   /* v99: a törölt (már nem létező) bejegyzések tömeges kivétele — egyesével
      koppintgatni 50 darabnál büntetés volt */
   (function(){
@@ -8686,6 +8978,13 @@ $('pMore').onclick=()=>{
        ha kész, a rendbetétel. A többi út a műhelyben van. */
     (!isYtRec()&&(hiany||gap))&&{t:(REC&&REC.sen.length)?'feldolgozás folytatása'
       :'szöveg készítése (felismerés)',pri:1,fn:sheetProcess},
+    /* v120: az „elejétől a végéig" fordító a napi menüben is — ez a leggyakoribb
+       teendő a gépen készült (vagy mappából behúzott) SRT után */
+    (REC&&(REC.sen||[]).some(x=>!x.hu))?{t:'fordítás elejétől a végéig ('+
+      (REC.sen.filter(x=>!x.hu).length)+' mondat)',pri:1,
+      fn:()=>{ closeSheet(); motorForditMind(REC) }}:null,
+    (MOTOR.fut||MOTOR.sor.length||GATE.on)?{t:'mi fut most? — '+motorAllapot(),
+      fn:()=>{ closeSheet(); progShow(true); motorPanel() }}:null,
     isYtRec()&&hiany&&{t:'YouTube-átirat beillesztése',pri:1,fn:()=>askPaste(REC)},
     (()=>{ const l=REC?listOf(REC.id):null;
       return l?{t:l.name+' — ez a '+(l.items.indexOf(REC.id)+1)+'. / '+l.items.length,
@@ -8857,12 +9156,15 @@ function sheetShop(){
     MAPPA?{t:'feliratok behúzása a mappából (név szerint)',fn:()=>subsSync(false)}:null,
     MAPPA?{t:'borítók begyűjtése a hangfájlokból',fn:()=>coverGather(false)}:null,
     MAPPA?{t:'borító-vizsgálat (3 fájl, részletes napló)',fn:()=>coverProbe()}:null,
-    JOB.on?{t:'beragadt „feldolgozás fut" jelzés elengedése',fn:()=>{
+    {t:'motor újraindítása (ha bármi beragadt volna)',fn:()=>{
       JOB.on=false; JOB.stop=true; JOBTS=0;
+      MOTOR.gen++; MOTOR.fut=false; MOTOR.feladat=null; MOTOR.varasIg=0;
+      MOTOR.szunet=false; MOTOR.kihagy={}; MOTOR.hibaSzam={};
       try{ progShow(false); jobDotDraw() }catch(e){}
-      log('a feldolgozás-jelzés kézzel elengedve');
-      toast('elengedve — indíthatsz új feldolgozást',5000);
-    }}:null,
+      log('motor kézzel újraindítva · '+motorAllapot());
+      setTimeout(motorEbreszt,200);
+      toast('motor újraindítva',4000);
+    }},
     {head:'ez a rész'},
     {t:'borító beállítása képből',fn:()=>askCover(REC)},
     {t:'kivitel: kétnyelvű TSV',fn:()=>exportTsv(REC)},
@@ -8886,12 +9188,13 @@ async function passRange(a,b){
   if(!MED) return toast('a hang nem elérhető');
   runPass(REC,MED,[[a,to]],'második átfutás');
 }
+/* ══════════ „mit csináljunk a szöveggel?" — a napi lap ══════════
+   v120: az indítók nem futtatnak, csak a MOTOR sorába tesznek. Ezért innen
+   bármit meg lehet nyomni akkor is, ha épp dolgozik valami: a sürgős (amit
+   hallgatsz) megelőzi a háttérmunkát, a többi szépen sorra kerül. */
 async function sheetProcess(){
   if(!REC) return;
-  if(!CFG.asrKey){ show('vSet'); return toast('előbb add meg a felismerő kulcsát') }
-  /* v111: a mappás használatban a fájl-hivatkozás elveszhet (felirat-behúzás
-     után, vagy újraindítás után), és akkor a lap azzal fogadott, hogy „húzd be
-     újra" — pedig a fájl ott van a mappában. Megkeressük magunktól. */
+  /* a mappás használatban a fájl-hivatkozás elveszhet — magunktól megkeressük */
   if(!FILE&&MAPPA){
     try{
       const f=await folderFind(REC);
@@ -8899,74 +9202,65 @@ async function sheetProcess(){
         String(REC.name||'').slice(0,50)) }
     }catch(e){ log('a hangfájl bekötése nem sikerült:',e) }
   }
-  if(!FILE){ return toast('a hangfájl nincs meg — a könyvtárban húzd be újra, vagy jelöld ki a podcast-mappát',7000) }
   const dur=REC.dur||A.duration||0;
   const t=A.currentTime||0;
   const gap=nextGap(REC.done,0,dur);
+  const nincsHu=(REC.sen||[]).filter(x=>!x.hu).length;
+  const kell=CFG.asrKey&&FILE;
   const kis=CFG.follow
-    ?{t:'kísérő mód kikapcsolása',fn:()=>{ CFG.follow=0; saveCfg();
-        toast('kísérő mód ki — a feldolgozást ezután kézzel indítod') }}
-    :{t:'kísérő mód: felismerés+fordítás a hallgatás előtt (~10 perc)',pri:1,fn:()=>{
-        CFG.follow=1;
-        if(CFG.trMode!=='live') CFG.trMode='live';
-        saveCfg();
-        /* v116: bekapcsoláskor kiírjuk a teljes állapotot — ha valami hiányzik,
-           egyetlen naplósorból kiderül, nem kell találgatni */
-        log('kísérő mód BE · kulcs:'+(CFG.asrKey?'van':'NINCS')+
-            ' · hangfájl:'+(FILE?'bekötve':'NINCS')+
-            ' · hossz:'+fmtT(REC&&REC.dur||A.duration||0)+
-            ' · feldolgozva:'+fmtT(doneSec((REC&&REC.done)||[]))+
-            ' · hang:'+(A.paused?'ÁLL (nyomj play-t)':'megy')+
-            ' · '+(followWhy()||'indulhat'));
-        toast('kísérő mód be: a felismerés ~10 perccel a hallgatás előtt jár, a '+
-          'fordítás menet közben készül',6000);
-        followTick().catch(e=>log('kísérő mód hiba:',e));
-      }};
-  sheet('mit ismerjünk fel?',[kis,
-    {note:'A felismerés '+asrCur().name+'-en fut. A Groq ingyenes szintje ehhez elég '+
-      '(0 Ft); fizetős szinten ~'+(asrHour()*HUF).toFixed(0)+' Ft/óra. Minden '+
-      'szelet után mentünk, a munka bármikor megszakítható és folytatható; ha a '+
-      'szolgáltató lassít (429), a program vár és magától folytatja. A „második '+
-      'átfutás" újra végigkérdezi a szakaszt, és csak HOZZÁTESZ: amit eddig '+
-      'megtaláltunk és lefordítottunk, ahhoz nem nyúl, és csak az új mondatok '+
-      'fordítása kerül tokenbe.'},
-    gap&&{t:'a hátralévő rész ('+fmtT(dur-doneSec(REC.done))+')',pri:1,
-      fn:()=>go(0,dur)},
-    /* v88: TISZTA ÚJRAKEZDÉS. A leirat nem a gyorsítótárban van, hanem az
-       app adatbázisában — a cache törlése ezért nem viszi el. Ez a gomb
-       elviszi: a mondatok és a feldolgozottság törlődik (a hangfájl és a
-       fordítási költség-számláló marad), és a felismerés nulláról indul a
-       teljes automatikus lánccal. */
-    (REC.sen&&REC.sen.length)?{t:'felismerés nulláról — a régi leirat törlése '+
-      'és tiszta újrakezdés ('+REC.sen.length+' mondat megy a kukába)',
-      fn:()=>goZero()}:null,
-    /* v94: törlés újrafelismerés NÉLKÜL — ha csak ki akarod dobni a szöveget,
-       kvóta és kérés nem fogy */
-    (REC.sen&&REC.sen.length)?{t:'a leirat törlése — felismerés nélkül '+
-      '('+REC.sen.length+' mondat megy a kukába, új felismerés NEM indul)',
-      fn:()=>goWipe()}:null,
-    /* Második átfutás: a `done`-t figyelmen kívül hagyja, és csak HOZZÁTESZ. A
-       kérésszámot kiírjuk, mert a Groq ingyenes szintje napi 120 kérés. */
-    {t:'második átfutás: a teljes felvétel (~'+passCalls([[0,dur]])+' kérés)',
-      fn:()=>goPass(0,dur)},
-    t>5?{t:'második átfutás: innentől a végéig (~'+passCalls([[t,dur]])+' kérés)',
-      fn:()=>goPass(t,dur)}:null,
+    ?{t:'kísérő mód KI — a felismerés csak kézzel indul',fn:()=>{ CFG.follow=0; saveCfg();
+        motorDrop(x=>x.pri===PRI.asrEl||x.pri===PRI.huEl);
+        toast('kísérő mód ki') }}
+    :{t:'kísérő mód BE — a szöveg magától '+(CFG.aheadMin||10)+
+        ' perccel a hallgatás előtt jár',pri:1,fn:()=>{ CFG.follow=1; saveCfg();
+        log('kísérő mód BE · '+(kiseroWhy()||'indulhat')); motorKisero();
+        toast('kísérő mód be',4000) }};
+  const kapu=CFG.gate
+    ?{t:'indítási kapu KI — a hang akkor is elindul, ha még nincs szöveg',
+       fn:()=>{ CFG.gate=0; saveCfg(); GATE.on=false; toast('kapu ki') }}
+    :{t:'indítási kapu BE — a hang megvárja az első '+(CFG.gateSec||75)+
+        ' másodperc kész szövegét',fn:()=>{ CFG.gate=1; saveCfg(); toast('kapu be') }};
+  sheet('felismerés és fordítás',[
+    {note:'Állapot: '+motorAllapot()+'. A felismerés '+asrCur().name+'-en fut '+
+      '('+asrSpentTxt()+'). Minden szelet után mentünk; a munka bármikor '+
+      'megállítható és folytatható, egy rossz szelet nem állítja meg a sort, '+
+      '429-nél a program kivár és magától folytatja.'},
+    kis, kapu,
+    (kell&&gap)?{t:'teljes feldolgozás — felismerés + fordítás, elejétől a végéig'+
+      ' ('+fmtT(dur-doneSec(REC.done))+' van hátra)',pri:1,
+      fn:()=>{ closeSheet(); motorTeljes(REC,1) }}:null,
+    (kell&&gap)?{t:'csak felismerés (angol), fordítás nélkül',
+      fn:()=>{ closeSheet(); motorTeljes(REC,0) }}:null,
+    nincsHu?{t:'fordítás elejétől a végéig — '+nincsHu+' mondat magyarul',pri:1,
+      fn:()=>{ closeSheet(); motorForditMind(REC) }}:null,
+    (kell&&gap&&t>5)?{t:'felismerés innentől a végéig ('+fmtT(t)+' →)',
+      fn:()=>{ closeSheet(); motorTeljes(REC,1,t,dur) }}:null,
+    (kell&&gap&&t>5)?{t:'felismerés innentől 10 percre',
+      fn:()=>{ closeSheet(); motorTeljes(REC,1,t,Math.min(dur,t+600)) }}:null,
+    (MOTOR.fut||MOTOR.sor.length||GATE.on)?{t:'MINDEN LEÁLLÍTÁSA — a sor ürítése',
+      fn:()=>{ closeSheet(); motorStop('a menüből') }}:null,
+    {head:'javítás (a műhely kézi menetei)'},
     (function(){
-      /* ha van elég nagy néma folt, ott olcsóbb csak azt megkérdezni */
-      const gs=senMissing(REC,GAP_MIN);   /* v78: belső kihagyás is */
+      const gs=REC.sen&&REC.sen.length?senMissing(REC,GAP_MIN):[];
       if(!gs.length) return null;
-      return {t:'kimaradt mondatok pótlása'+
-        (asrModel()==='whisper-large-v3-turbo'?' (pontos modellel)':'')+
-        ' — '+gs.length+' hézag · '+fmtT(gapSec(gs))+' · ~'+passCalls(gs)+' kérés',
-        pri:1,fn:()=>goGaps()};
+      return {t:'kimaradt mondatok pótlása — '+gs.length+' hézag · '+fmtT(gapSec(gs))+
+        ' · ~'+passCalls(gs)+' kérés',fn:()=>goGaps()};
     })(),
-    (REC.sen&&REC.sen.length>10)?{t:'ellenőrzés és javítás — a hiányzó mondatok '+
-      'megkeresése és pótlása egy gombbal',pri:1,fn:()=>goFix()}:null,
-    {t:'innentől 10 perc',fn:()=>go(t,Math.min(dur,t+600))},
-    {t:'innentől 30 perc',fn:()=>go(t,Math.min(dur,t+1800))},
-    {t:'innentől a végéig',fn:()=>go(t,dur)},
+    (kell&&REC.sen&&REC.sen.length>10)?{t:'ellenőrzés és javítás (hiányzó mondatok '+
+      'megkeresése és pótlása)',fn:()=>goFix()}:null,
+    kell?{t:'második átfutás: a teljes felvétel (~'+passCalls([[0,dur]])+' kérés)',
+      fn:()=>passRange(0,dur)}:null,
+    {head:'újrakezdés'},
+    (REC.sen&&REC.sen.length)?{t:'felismerés nulláról — a régi leirat törlése ('+
+      REC.sen.length+' mondat megy a kukába)',fn:()=>goZero()}:null,
+    (REC.sen&&REC.sen.length)?{t:'a leirat törlése — új felismerés NEM indul',
+      fn:()=>goWipe()}:null,
+    (!CFG.asrKey)?{t:'⚙ felismerő-kulcs megadása (enélkül csak felirat/fordítás megy)',
+      fn:()=>show('vSet')}:null,
+    (!FILE&&CFG.asrKey)?{note:'A hangfájl nincs bekötve, ezért felismerni most nem '+
+      'tudunk — a könyvtárban húzd be újra, vagy jelöld ki a podcast-mappát. '+
+      'A fordítás (SRT-ből behúzott szöveghez) enélkül is megy.'}:null
   ]);
-  const goPass=(a,b)=>passRange(a,b);   /* v76: passRange is a pótló beállításokkal fut */
   async function goGaps(){
     try{ await prepMedia() }
     catch(e){ return toast('a hang szerkezete nem olvasható: '+e.message,5000) }
@@ -8979,40 +9273,36 @@ async function sheetProcess(){
     if(!MED) return toast('a hang nem elérhető');
     runFix(REC,MED);
   }
-  /* v104: egy helyen él a törlés — a globális wipeText */
   async function goWipe(){ closeSheet(); await wipeText(REC) }
   async function goZero(){
     if(!confirm('A régi leirat ('+REC.sen.length+' mondat) VÉGLEG törlődik, és a '+
       'felismerés nulláról indul.\n\nA hangfájlhoz nem nyúlunk. Mehet?')) return;
-    try{ await prepMedia() }
-    catch(e){ return toast('a hang szerkezete nem olvasható: '+e.message,5000) }
-    if(!MED) return toast('a hang nem elérhető');
+    closeSheet();
+    motorDrop(x=>x.rec===REC.id);
     REC.sen=[]; REC.done=[];
     delete REC.subMt; delete REC.subName;
     await save(REC);
     renderKara(true);
-    log('felismerés nulláról: a régi leirat törölve, tiszta újrakezdés');
-    toast('a régi leirat törölve — a felismerés nulláról indul',4000);
-    runJob(REC,MED,0,dur);
-  }
-  async function go(a,b){
-    try{ await prepMedia() }
-    catch(e){ return toast('a hang szerkezete nem olvasható: '+e.message,5000) }
-    if(!MED) return toast('a hang nem elérhető');
-    if(MED.kind==='whole'&&MED.file&&MED.file.size>24*1024*1024)
-      return toast('ennek a fájlnak a felépítését nem ismerem, ezért nem tudom felszeletelni, '+
-        'egészben pedig nem fér a felismerő 25 MB-os korlátjába — a ⚙ hibanapló megmutatja, '+
-        'melyik bontó miért adta fel',9000);
-    runJob(REC,MED,a,b);
+    log('felismerés nulláról: a régi leirat törölve');
+    motorTeljes(REC,1);
   }
 }
+/* v120: EGY gomb, ami mindent leállít. A kézi műhely-menetek megállítása
+   maradt a régi úton; minden más a motor sora, azt egyben ürítjük. */
 $('progStop').onclick=async()=>{
   if(RT){ RTSTOP=true; $('progStop').textContent='megállítás…'; return }
   if(JOB.on){ JOB.stop=true; $('progStop').textContent='megállítás…'; return }
-  if(!REC||!MED) return progShow(false);
-  const gap=nextGap(REC.done,0,REC.dur||1e9);
-  if(!gap) return progShow(false);
-  runJob(REC,MED,0,REC.dur||1e9);
+  if(GATE.on){ GATE.on=false; motorStop('a kapu megszakítva'); progShow(false); return }
+  if(MOTOR.fut||MOTOR.sor.length){ motorStop('kézi leállítás'); return }
+  progShow(false);
+};
+/* a kapu megkerülése: hallgatás szöveg nélkül, ha a felhasználó úgy dönt */
+$('progGo').onclick=()=>{
+  if(!GATE.on) return progShow(false);
+  GATE.on=false;
+  log('kapu: megkerülve — a lejátszás szöveg nélkül indul');
+  progShow(false);
+  try{ _playRaw() }catch(e){}
 };
 $('progHide').onclick=()=>progShow(false);
 $('jobDot').onclick=()=>progShow(true);
@@ -9236,6 +9526,9 @@ async function subsSync(quiet){
     }
   }
   if(uj||csere) drawLib();
+  /* v120: ami épp nyitva van, annak a fordítása azonnal a sorba kerül; a többi
+     rész akkor fordul, amikor hallgatod (vagy kézzel: „fordítás elejétől a végéig") */
+  if(REC&&(REC.sen||[]).some(x=>!x.hu)) motorForditMind(REC);
   log('feliratmappa: '+subs.length+' feliratfájl · '+uj+' új · '+csere+' frissítve'+
         (arva?' · '+arva+' felirathoz nincs (egyértelmű) rész a könyvtárban'+
           (arvak.length?' (pl. '+arvak.join(' | ')+')':''):''));
@@ -9383,13 +9676,10 @@ async function importText(rec,f){
   drawLib();
   /* ha maradt fordítatlan mondat, rögtön indul a fordítás — átiratnál ez az
      egyetlen feldolgozási lépés, és kár külön megkérni rá a felhasználót */
-  if(rec.sen.some(x=>!x.hu)){
-    try{
-      const n=await fillHu(rec.sen,(dn,t)=>progSet(t?dn/t*100:100,'fordítás',dn+' / '+t));
-      progShow(false);
-      if(n){ await save(rec); if(REC&&REC.id===rec.id){ renderKara(true); huBuild(); renderHu(true) } }
-    }catch(e){ progShow(false); log('betöltés utáni fordítás:',e) }
-  }
+  /* v120: a fordítás a MOTOR sorába megy — megszakítható, látszik a haladása,
+     és nem fagyasztja be a felületet egy 900 mondatos SRT-nél. A behúzott
+     felirat után a `done` teljes, tehát a felismerőnek itt nincs dolga. */
+  if(rec.sen.some(x=>!x.hu)) motorForditMind(rec);
 }
 /* A beillesztett átirat ugyanazon a láncon megy be, mint az SRT: mondatokra
    bontás → mergeSen → a lefedett szakasz késznek jelölése → mentés. */
@@ -9649,6 +9939,17 @@ function drawSet(){
   $('asrNote').textContent=asrCur().note;
   $('chunkMin').value=CFG.chunkMin;
   $('vChunk').textContent=CFG.chunkMin+' perc';
+  /* v120: motor-beállítások */
+  segFill($('segGate'),[[1,'bekapcsolva'],[0,'kikapcsolva']],CFG.gate?1:0,k=>{
+    CFG.gate=+k; saveCfg(); if(!CFG.gate) GATE.on=false; drawSet() });
+  $('gateSec').value=CFG.gateSec||75;
+  $('vGate').textContent=(CFG.gateSec||75)+' másodpercnyi';
+  $('aheadMin').value=CFG.aheadMin||10;
+  $('vAhead').textContent=(CFG.aheadMin||10)+' perc felismerés · '+
+    (CFG.trAheadMin||6)+' perc fordítás';
+  $('quotaMin').value=CFG.quotaMin||100;
+  $('vQuota').textContent=(CFG.quotaMin||100)+' perc/óra';
+  $('vSpent').textContent=asrSpentTxt();
   segFill($('segPcm'),[[1,'javított (WAV)'],[0,'nyers szelet']],CFG.pcm===0?0:1,k=>{
     CFG.pcm=+k; pcmFail=0; saveCfg(); drawSet();
     toast(+k?'javított hang-előkészítés — kevesebb kihagyás':'nyers szeletküldés',3000) });
@@ -9739,6 +10040,14 @@ const bindTxt=(id,key)=>{ $(id).addEventListener('change',()=>{ CFG[key]=$(id).v
 bindTxt('asrKey','asrKey'); bindTxt('asrUrl','asrUrl'); bindTxt('asrModel','asrModel');
 bindTxt('dlKey','dlKey'); bindTxt('clKey','clKey'); bindTxt('oaiUrl','oaiUrl'); bindTxt('oaiKey','oaiKey'); bindTxt('oaiModel','oaiModel');
 $('chunkMin').oninput=()=>{ CFG.chunkMin=+$('chunkMin').value; $('vChunk').textContent=CFG.chunkMin+' perc'; saveCfg() };
+$('gateSec').oninput=()=>{ CFG.gateSec=+$('gateSec').value;
+  $('vGate').textContent=CFG.gateSec+' másodpercnyi'; saveCfg() };
+$('aheadMin').oninput=()=>{ CFG.aheadMin=+$('aheadMin').value;
+  CFG.trAheadMin=Math.max(2,Math.round(CFG.aheadMin*0.6));
+  $('vAhead').textContent=CFG.aheadMin+' perc felismerés · '+CFG.trAheadMin+
+    ' perc fordítás'; saveCfg() };
+$('quotaMin').oninput=()=>{ CFG.quotaMin=+$('quotaMin').value;
+  $('vQuota').textContent=CFG.quotaMin+' perc/óra'; saveCfg() };
 $('kFs').oninput=()=>{ CFG.kfs=+$('kFs').value; saveCfg(); applyLook();
   $('vFs').textContent=Math.round(CFG.kfs*1.618*16)+'px' };
 function applyLook(){
@@ -9967,13 +10276,17 @@ addEventListener('beforeunload',()=>{ if(REC){ REC.pos=A.currentTime; try{txtPut
    A böngésző konzoljából (vagy asztali gépen a fejlesztői eszközökből) így
    megnézhető és javítható a tároló tartalma anélkül, hogy a felületet kellene
    végigkattintani. */
-window.HG={txtAll,txtGet,txtPut,txtDel,medAll,medGet,medDel,openMedia,cut,runJob,
+window.HG={txtAll,txtGet,txtPut,txtDel,medAll,medGet,medDel,openMedia,cut,
   audSave,audLoad,audDrop,audKeys,audSizes,freeSpace,bgSaveAudio,adtsOpen,
   log, logs:()=>LOG, fillHu, fillLive,
   setRec:(r,c)=>{ REC=r; if(typeof c==='number') CUR=c; },
   setFile:f=>{ FILE=f; MED=null },
   setJob:b=>{ JOB.on=!!b },
-  followTick, followPlan,
+  /* v120: a motor kívülről is vizsgálható és vezérelhető (a jsdom-tesztek ezt hívják) */
+  MOTOR, GATE, PRI, motorPush, motorNext, motorDrop, motorLoop, motorEbreszt,
+  motorStop, motorKisero, motorTeljes, motorForditMind, motorAllapot, motorPanel,
+  frontOf, huHiany, gateMi, gateIndit, kiseroWhy, motorHiba,
+  asrSpent, asrSpentTxt, ASRSEC,
   parseSrt, parseTsv, importText, setCover, updHuBar, checkUpdate,
   drawSeek, layoutSplit, drawHuBtn, gotoSen, huBuild, renderHu, paintHu, scrollTick,
   get hug(){return HUG}, get humap(){return HUMAP}, audio:()=>A, fitFlow, huSplit, huGi,
