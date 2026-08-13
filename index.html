@@ -568,7 +568,9 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    Egyetlen domináns elem a polc fején: a borító a kijelző arányában, rajta
    három tipográfiai szint és egy lejátszás-gomb. A sötétítő átmenet nélkül a
    világos borítókon olvashatatlan lenne a szöveg (figure-ground). */
-#resume{position:relative;display:block;width:100%;aspect-ratio:16/9;
+/* v114: négyzetes — a podcast-borítók 1:1 arányúak, 16:9-ben csak a közepük
+   látszott. Így az egész kép megvan, és a kártya „nagy csempe" hatású. */
+#resume{position:relative;display:block;width:100%;aspect-ratio:1/1;
   border-radius:var(--r3);overflow:hidden;cursor:pointer;
   border:1px solid rgba(232,182,76,.30);
   background:linear-gradient(145deg,#241f2e,#12111a);
@@ -582,9 +584,10 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
 #resume .rsIni{position:absolute;inset:0;display:flex;align-items:center;
   justify-content:center;font-family:var(--disp);font-size:38px;
   letter-spacing:.1em;color:rgba(232,182,76,.30)}
+/* négyzetes képen a felső kétharmad maradjon tiszta, a szöveg alatt sötétít */
 #resume .rsScrim{position:absolute;inset:0;pointer-events:none;
-  background:linear-gradient(180deg,rgba(6,5,9,.10) 0%,rgba(6,5,9,.30) 42%,rgba(6,5,9,.90) 100%),
-             linear-gradient(90deg,rgba(6,5,9,.72) 0%,rgba(6,5,9,.22) 58%,transparent 100%)}
+  background:linear-gradient(180deg,transparent 0%,rgba(6,5,9,.08) 46%,rgba(6,5,9,.62) 74%,rgba(6,5,9,.94) 100%),
+             linear-gradient(90deg,rgba(6,5,9,.42) 0%,rgba(6,5,9,.10) 60%,transparent 100%)}
 #resume .rsIn{position:absolute;left:0;right:0;bottom:0;
   padding:var(--sp4) var(--sp4) calc(var(--sp4) + 4px);
   display:flex;align-items:flex-end;gap:var(--sp4)}
@@ -624,9 +627,13 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
   background:linear-gradient(90deg,rgba(232,182,76,.55),rgba(232,182,76,0))}
 /* v111: szűkebb rés — a csempék alól kikerült az adatsor, így a régi nagy
    térköz csak üres helyet hagyott a nevek között */
-#lib.shelf{display:grid;grid-template-columns:repeat(auto-fill,minmax(104px,1fr));
+/* v114: a rács-szabály a LENYÍLÓ részre is érvényes — id-hez kötve csak az
+   eredeti polcra vonatkozott, ezért a kigördült csempék egy oszlopban,
+   képernyő szélességben jelentek meg */
+#lib.shelf,#libRest.shelf{display:grid;
+  grid-template-columns:repeat(auto-fill,minmax(104px,1fr));
   gap:var(--sp4) var(--sp3)}
-#lib.shelf .item{display:none}
+#lib.shelf .item,#libRest.shelf .item{display:none}
 .bk{position:relative;cursor:pointer;-webkit-tap-highlight-color:transparent}
 .bk .art{position:relative;aspect-ratio:1/1;border-radius:var(--r3);overflow:hidden;
   background:linear-gradient(145deg,#241f2e,#12111a);border:1px solid var(--line2);
@@ -1194,7 +1201,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v113';
+const APP_VER='v114';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -8421,6 +8428,13 @@ async function drawLib(){
     if(RESTBOX){
       RESTBOX.classList.toggle('hid',!nyit||!rest);
       RESTBOX.classList.toggle('shelf',true);
+      /* v114: nyitva a becsukó pöcök a kigördült tételek ALÁ kerül — ott keresi
+         a szem és az ujj is, miután végigfutott a csempéken */
+      if(MOREBTN&&RESTBOX.parentNode){
+        const p=RESTBOX.parentNode;
+        if(nyit&&rest) p.insertBefore(MOREBTN,RESTBOX.nextSibling);
+        else p.insertBefore(MOREBTN,RESTBOX);
+      }
     }
     coverSweep();
     return;
