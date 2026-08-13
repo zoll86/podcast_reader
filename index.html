@@ -1178,7 +1178,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v108';
+const APP_VER='v109';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -7169,6 +7169,16 @@ let COVURL='';
 function setCover(rec){
   const el=$('coverBg'); if(el&&COVURL){ URL.revokeObjectURL(COVURL); COVURL='' }
   const c=rec&&rec.cover&&rec.cover.b&&rec.cover.b.length?rec.cover:null;
+  /* v109: saját kép híján a lista beállított borítója kerül a szöveg mögé.
+     Az dataURL, tehát nem kell (és nem is szabad) blob-URL-t készíteni rá. */
+  if(el&&!c){
+    const l=rec?listOf(rec.id):null;
+    if(l&&l.cov){
+      el.style.backgroundImage='url("'+l.cov+'")';
+      document.body.classList.add('hascover');
+      return;
+    }
+  }
   if(el&&c){
     try{
       COVURL=URL.createObjectURL(new Blob([c.b],{type:c.mime||'image/jpeg'}));
@@ -7670,7 +7680,7 @@ async function sheetQueue(lid){
        kintről látszik, mi hallgatható fordítással */
     const sn=r.sen||[];
     const ford=(sn.length&&sn.filter(s=>s.hu).length/sn.length>=0.95)?' ✓HU':'';
-    items.push({art:coverUrl(r.id,r.cover),
+    items.push({art:recCoverUrl(r),
       t:(most?'▶ ':'')+(i+1)+'. '+r.name+ford+hol,pri:most?1:0,
       fn:async()=>{ closeSheet(); await openRec(r); try{ await A.play() }catch(e){} },
       x:{t:'✕',title:'kivétel a listából',fn:()=>{
@@ -8087,6 +8097,18 @@ async function bgSaveAudio(rec,file){
 
    A blob-címeket gyorstárazzuk, különben minden újrarajzolás szivárogna. */
 const COVU={};
+/* ======== v109: melyik kép látszik egy résznél ========
+   Sorrend: (1) a rész saját képe — beágyazott vagy kézzel adott; (2) a lista
+   kézzel beállított borítója, amiben a rész szerepel. A lista automatikus
+   borítója (az első rész képe) NEM öröklődik: az önmagában is csak egy rész
+   képe, félrevezető lenne az egész sorozatra ráhúzni. */
+function recCoverUrl(rec){
+  if(!rec) return '';
+  const sajat=coverUrl(rec.id,rec.cover);
+  if(sajat) return sajat;
+  const l=listOf(rec.id);
+  return (l&&l.cov)?l.cov:'';
+}
 function coverUrl(key,cov){
   if(!cov||!cov.b||!cov.b.length) return '';
   const kind=imgKind(cov.b);
@@ -8129,7 +8151,7 @@ function bkCard(r,part){
   el.innerHTML='<div class="art"><div class="scrim"></div>'+
     '<div class="hbar"><i></i></div><div class="bar"><i></i></div></div>'+
     '<div class="plc"></div><b></b><span></span><button class="more">⋯</button>';
-  bkArt(el,coverUrl(r.id,r.cover),r.name);
+  bkArt(el,recCoverUrl(r),r.name);
   const pos=bkPos(r), hp=heardPct(r), pct=r.dur?Math.round(doneSec(r.done||[])/r.dur*100):0;
   el.querySelector('.bar i').style.width=pos+'%';
   el.querySelector('.hbar i').style.width=hp+'%';
@@ -8227,7 +8249,7 @@ function drawResume(recs,byId){
   const pct=jelolt.dur?Math.min(99,Math.round(jelolt.pos/jelolt.dur*100)):0;
   const sn=jelolt.sen||[];
   const hu=sn.length&&sn.filter(s=>s.hu).length/sn.length>=0.95;
-  const art=coverUrl(jelolt.id,jelolt.cover);
+  const art=recCoverUrl(jelolt);
   /* v108: a rész címéből levágjuk a sorszámot és a sorozat nevét, ha az a
      feliratban már ott van — kétszer ugyanazt olvasni zaj, nem információ */
   let cim=String(jelolt.name||'').replace(/^\s*\d{1,4}\s*[-–—.]\s*/,'');
