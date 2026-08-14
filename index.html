@@ -1237,7 +1237,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v129';
+const APP_VER='v130';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -1975,6 +1975,38 @@ const MP3_BR=[
   [0,8,16,24,32,40,48,56,64,80,96,112,128,144,160]                 /* MPEG2 L2/L3 */
 ];
 const MP3_SR=[[44100,48000,32000],[22050,24000,16000],[11025,12000,8000]];
+/* ══════════════════════════════════════════════════════════════════════════
+   v130: FOLYAMATOS OLVASÁS — a mappás fájl indexelésének igazi orvossága
+   A korai (böngészős) változat azért volt gyors, mert ott a fájl valódi File
+   objektum: a slice() natív és ingyen van. A mappás (SAF) fájlnál minden
+   slice() külön kérés a natív kiszolgálóhoz, és az minden kérésnél elölről
+   nyitja a folyamot, majd odáig ugrik — ezért nőtt az idő négyzetesen (a
+   naplóban 524 másodperc egy 7 órás hangnál). Megoldás: EGY kérés, és a
+   választ folyamként olvassuk végig. Egy megnyitás, egy végigolvasás.
+   ══════════════════════════════════════════════════════════════════════════ */
+async function* fajlFolyam(file,from){
+  from=from||0;
+  const url=file&&(file.url||(file.saf?safUrl(file.saf):null));
+  if(url&&typeof fetch==='function'){
+    const r=await fetch(url,{headers:{Range:'bytes='+from+'-'}});
+    if(r.ok||r.status===206||r.status===200){
+      if(r.body&&r.body.getReader){
+        const rd=r.body.getReader();
+        for(;;){ const {done,value}=await rd.read(); if(done) break; if(value&&value.length) yield value }
+        return;
+      }
+      yield new Uint8Array(await r.arrayBuffer());
+      return;
+    }
+  }
+  /* tartalék: darabokban (valódi File esetén ez amúgy is gyors) */
+  const BS=1<<21;
+  for(let pos=from;pos<file.size;pos+=BS){
+    const u=await readSlice(file,pos,Math.min(file.size,pos+BS));
+    if(!u.length) break;
+    yield u;
+  }
+}
 async function mp3Open(file,onMsg){
   let off=0;
   const h=await readSlice(file,0,10);
@@ -1993,13 +2025,33 @@ async function mp3Open(file,onMsg){
     const l2=new Uint16Array(cap); l2.set(lens); lens=l2;
     const t2=new Float64Array(cap+1); t2.set(tms); tms=t2;
   };
-  let pos=off, t=0, buf=null, bufAt=0;
-  const BS=1<<21;
+  let pos=off, t=0, buf=null, bufAt=off;
+  /* a folyamot egyszer nyitjuk meg, és a darabokat egymás után fűzzük;
+     a puffer mindig a még fel nem dolgozott maradékkal kezdődik */
+  const folyam=fajlFolyam(file,off)[Symbol.asyncIterator]();
+  let vege=false, jelzo=0;
+  const tolt=async(kell)=>{
+    for(;;){
+      const van=buf?(bufAt+buf.length-pos):0;
+      if(van>=kell||vege) return van;
+      const {done,value}=await folyam.next();
+      if(done){ vege=true; return van }
+      if(buf&&van>0){
+        const maradek=buf.subarray(pos-bufAt);
+        const uj=new Uint8Array(maradek.length+value.length);
+        uj.set(maradek,0); uj.set(value,maradek.length);
+        buf=uj; bufAt=pos;
+      }else{ buf=value; bufAt=pos }
+      if(Date.now()-jelzo>400){
+        jelzo=Date.now();
+        onMsg&&onMsg('keretek keresése… '+Math.round(pos/file.size*100)+'%',pos/file.size);
+        MOTOR&&(MOTOR.eletjel=Date.now());
+      }
+    }
+  };
   while(pos<file.size-4){
     if(!buf||pos<bufAt||pos+4>bufAt+buf.length){
-      buf=await readSlice(file,pos,Math.min(file.size,pos+BS)); bufAt=pos;
-      if(buf.length<4) break;
-      onMsg&&onMsg('keretek keresése… '+Math.round(pos/file.size*100)+'%',pos/file.size);
+      if(await tolt(4)<4) break;
     }
     const o=pos-bufAt;
     if(buf[o]!==0xff||(buf[o+1]&0xe0)!==0xe0){ pos++; continue }
@@ -2019,7 +2071,11 @@ async function mp3Open(file,onMsg){
        vagy bármi más folyam belsejében talált 0xFF bájtokból értelmetlen
        „mp3" épülne, teljesen rossz időzítéssel. */
     if(pos+len<file.size-4){
-      if(o+len+3>buf.length){ buf=null; continue }   /* ablak újraközepezése */
+      if(o+len+3>buf.length){                        /* több bájt kell a döntéshez */
+        if(await tolt(len+4)<len+4){ if(!vege) continue }
+        if(pos-bufAt+len+3>=(buf?buf.length:0)) break;
+        continue;
+      }
       const n0=buf[o+len], n1=buf[o+len+1];
       const sync=n0===0xff&&(n1&0xe0)===0xe0;
       const tag=n0===0x54&&n1===0x41&&buf[o+len+2]===0x47;
