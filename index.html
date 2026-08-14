@@ -1237,7 +1237,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v130';
+const APP_VER='v131';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -2007,7 +2007,15 @@ async function* fajlFolyam(file,from){
     yield u;
   }
 }
-async function mp3Open(file,onMsg){
+async function* fajlDarab(file,from){
+  const BS=1<<21;
+  for(let pos=from||0;pos<file.size;pos+=BS){
+    const u=await readSlice(file,pos,Math.min(file.size,pos+BS));
+    if(!u.length) break;
+    yield u;
+  }
+}
+async function mp3Open(file,onMsg,darabolva){
   let off=0;
   const h=await readSlice(file,0,10);
   if(h[0]===0x49&&h[1]===0x44&&h[2]===0x33) off=10+((h[6]&127)<<21|(h[7]&127)<<14|(h[8]&127)<<7|(h[9]&127));
@@ -2028,7 +2036,7 @@ async function mp3Open(file,onMsg){
   let pos=off, t=0, buf=null, bufAt=off;
   /* a folyamot egyszer nyitjuk meg, és a darabokat egymás után fűzzük;
      a puffer mindig a még fel nem dolgozott maradékkal kezdődik */
-  const folyam=fajlFolyam(file,off)[Symbol.asyncIterator]();
+  const folyam=(darabolva?fajlDarab(file,off):fajlFolyam(file,off))[Symbol.asyncIterator]();
   let vege=false, jelzo=0;
   const tolt=async(kell)=>{
     for(;;){
@@ -2087,6 +2095,17 @@ async function mp3Open(file,onMsg){
     pos+=len;
   }
   if(n<10) return null;
+  /* ══ v131: A CSONKA INDEX ROSSZABB, MINT A LASSÚ ══
+     Ha a folyam korábban elfogyott, mint a fájl (a natív kiszolgáló megszakadt),
+     az index hiányos — és a vágás minden későbbi időpontra a fájl EGÉSZÉT adná
+     vissza (a naplóban „a szelet 692 MB”). Ilyenkor inkább újra, darabolva. */
+  const vegig=(offs[n-1]+lens[n-1])>=file.size*0.97;
+  if(!vegig){
+    log('a keretkeresés a fájl '+Math.round((offs[n-1]+lens[n-1])/file.size*100)+
+        '%-áig jutott — az olvasás megszakadt'+(darabolva?'':', újra darabolva'));
+    if(!darabolva) return await mp3Open(file,onMsg,true);
+    return null;
+  }
   return {kind:'mp3',file,dur:t,n:n,
           offs:offs.subarray(0,n), lens:lens.subarray(0,n),
           times:tms.subarray(0,n+1)};
@@ -2094,11 +2113,22 @@ async function mp3Open(file,onMsg){
 /* a keretek elérése: az új (tömbös) és a régi (objektumos) alakot is kezeli */
 const frOff=(M,i)=>M.offs?M.offs[i]:M.fr[i].o;
 const frLen=(M,i)=>M.lens?M.lens[i]:M.fr[i].len;
-async function cutMp3(M,t0,t1){
-  let i0=lowerBound(M.times,t0,M.n), i1=lowerBound(M.times,t1,M.n);
+/* v131: a keretsorszámok szorítása — ha a kért idő az indexen kívülre esik,
+   az HIBA, nem pedig „vágjuk ki az egészet”. Ez küldte fel a teljes fájlt. */
+function frTart(M,t0,t1){
+  const n=M.n|0;
+  if(!n||!(frOff(M,0)>=0)) throw new Error('a hang indexe hiányzik');
+  let i0=lowerBound(M.times,t0,n), i1=lowerBound(M.times,t1,n);
   if(i0>0&&M.times[i0]>t0) i0--;
-  if(i1<=i0) i1=Math.min(M.n,i0+1);
+  i0=Math.max(0,Math.min(n-1,i0));
+  i1=Math.max(i0+1,Math.min(n,i1));
   const a=frOff(M,i0), b=frOff(M,i1-1)+frLen(M,i1-1);
+  if(!(b>a)||!isFinite(a)||!isFinite(b))
+    throw new Error('a hang indexe nem fedi ezt a szakaszt ('+fmtT(t0)+'–'+fmtT(t1)+')');
+  return {i0,i1,a,b};
+}
+async function cutMp3(M,t0,t1){
+  const {i0,i1,a,b}=frTart(M,t0,t1);
   return {blob:new Blob([await safBlob(M.file.slice(a,b))],{type:'audio/mpeg'}), name:'r.mp3',
           t0:M.times[i0], t1:M.times[i1]};
 }
@@ -2290,10 +2320,7 @@ async function adtsOpen(file,onMsg){
   return {kind:'adts',file,dur:t,n:fr.length,fr,times:Float64Array.from(times)};
 }
 async function cutAdts(M,t0,t1){
-  let i0=lowerBound(M.times,t0,M.n), i1=lowerBound(M.times,t1,M.n);
-  if(i0>0&&M.times[i0]>t0) i0--;
-  if(i1<=i0) i1=Math.min(M.n,i0+1);
-  const a=frOff(M,i0), b=frOff(M,i1-1)+frLen(M,i1-1);
+  const {i0,i1,a,b}=frTart(M,t0,t1);
   return {blob:new Blob([await safBlob(M.file.slice(a,b))],{type:'audio/aac'}),name:'r.aac',
           t0:M.times[i0],t1:M.times[i1]};
 }
@@ -5647,9 +5674,17 @@ async function motorAsr(t,rec){
         CFG.chunkMin+' percre állítva (több kérés, de haladunk)');
   }
   if(piece.blob.size>24*1024*1024){
+    /* v131: ez nem „egy rossz szelet”, hanem rendszerhiba (rossz index vagy túl
+       nagy szeletméret) — a feladat MEGÁLL, nem írja tele a naplót nyolcvanszor */
     log('MOTOR: a '+fmtT(t0)+'–'+fmtT(t1)+' szelet '+fmtMB(piece.blob.size)+
-        ' — a felismerő 25 MB-ig fogad; állítsd kisebbre a szeletméretet (⚙)');
-    rec.done=mergeDone(rec.done,t0,t1); await save(rec); t.a=t1; return true;
+        ' lett, a felismerő 25 MB-ig fogad — a feldolgozás megáll. '+
+        (vagMs<3000?'A hang indexe hibás lehet: ⋯ → műhely → „a hang újraolvasása”.'
+                   :'Állítsd kisebbre a szeletméretet (⚙).'));
+    toast('a szelet túl nagy ('+fmtMB(piece.blob.size)+') — a feldolgozás megállt, '+
+      'a részletek a ⚙ hibanaplóban',9000);
+    MOTOR.kihagy[rec.id]='túl nagy szelet';
+    motorDrop(x=>x.rec===rec.id);
+    return false;
   }
   let d=null;
   fazis('felismerés');
@@ -9778,6 +9813,19 @@ function sheetShop(){
     MAPPA?{t:'feliratok behúzása a mappából (név szerint)',fn:()=>subsSync(false)}:null,
     MAPPA?{t:'borítók begyűjtése a hangfájlokból',fn:()=>coverGather(false)}:null,
     MAPPA?{t:'borító-vizsgálat (3 fájl, részletes napló)',fn:()=>coverProbe()}:null,
+    {t:'a hang újraolvasása (az eltárolt index eldobása)',fn:async()=>{
+      closeSheet();
+      try{
+        if(REC){
+          const f=await motorFajl(REC);
+          if(f){ await idxOp('readwrite',st=>st.delete(idxKey(f)));
+            log('a '+String(REC.name||'').slice(0,40)+' eltárolt hangindexe törölve') }
+        }
+        MMED.id=''; MMED.M=null; MED=null; MEDP=null;
+        delete MOTOR.kihagy[REC&&REC.id];
+        toast('a hang újra lesz olvasva a következő feldolgozásnál',6000);
+      }catch(e){ log('index törlése:',e) }
+    }},
     {t:'motor újraindítása (ha bármi beragadt volna)',fn:()=>{
       JOB.on=false; JOB.stop=true; JOBTS=0;
       MOTOR.gen++; MOTOR.fut=false; MOTOR.feladat=null; MOTOR.varasIg=0;
