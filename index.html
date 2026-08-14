@@ -158,6 +158,8 @@ input[type=range]{width:100%;accent-color:var(--gold);min-height:32px}
   padding:2px 7px;border-radius:20px;border:1px solid var(--line);color:var(--dim)}
 .pill.ok{border-color:rgba(87,217,163,.45);color:var(--green)}
 .pill.part{border-color:rgba(232,182,76,.45);color:var(--gold)}
+.pill.bad{border-color:rgba(232,90,90,.5);color:#e57373}
+span.pill.bad{color:#e57373}
 span.pill.ok{color:var(--green)}
 span.pill.part{color:var(--gold)}
 span.pill{display:inline-block}
@@ -774,9 +776,14 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
         <div class="row" style="margin-bottom:var(--sp2)">
           <button class="mini" id="folderPick">mappa kijelölése</button>
           <button class="mini" id="folderScan">újraolvasás</button>
+          <button class="mini" id="folderCheck">minden hang ellenőrzése</button>
           <button class="mini" id="folderLists">almappák → listák</button>
           <button class="mini" id="folderForget">mappa elfelejtése</button>
         </div>
+        <div class="note">A <b>minden hang ellenőrzése</b> végigméri a részeket, és a
+          polcon mindegyikre kiteszi, hogy tud-e vele dolgozni a program: <span
+          class="pill ok">✓ mehet</span> vagy <span class="pill bad">✗ + az ok</span>.
+          Amivel nem tud, annak a hangját egy koppintással bemásolja a telefonra.</div>
         <div class="note" id="folderInfo">Jelöld ki a podcast-mappádat: onnantól a
           benne lévő hangfájlok itt jelennek meg, és egy koppintással megnyithatók —
           behúzás és másolás nélkül. A mappát a rendszer választója engedélyezi,
@@ -1230,7 +1237,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v126';
+const APP_VER='v127';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -3389,6 +3396,7 @@ const MOTOR={
   hibaSzam:{},       /* recId -> egymás utáni hibák */
   kihagy:{},         /* recId -> miért esett ki */
   kesz:0,            /* ebben a menetben feldolgozott szeletek */
+  elvet:0,           /* ennek a feladatnak az eredménye már nem érdekes */
   futGen:0,          /* melyik generáció tartja a „fut" jelzést */
   fg:false,          /* fut-e az előtér-szolgáltatás (Android) */
   /* A kifelé menő három művelet egy helyen, nevesítve. Ettől a motor útja
@@ -5324,6 +5332,17 @@ function motorStop(ok){
   MOTOR.futGen=0; MOTOR.fut=false; MOTOR.varasIg=0; MOTOR.miert='';
   keresAbort('leállítás');          /* v125: a folyamatban lévő kérés is elvágva */
   GATE.tilt=0; GATE.tiltRec=null;
+  /* ══ v127: a „minden leállítása” tényleg MINDENT jelent ══
+     Eddig a hallgatás közbeni feldolgozás négy másodperc múlva magától
+     visszatette ugyanazt a feladatot — a leállítás így hiábavaló volt. Ha a
+     felhasználó leállítást kér, a kísérő is kikapcsol; egy koppintással
+     visszakapcsolható. */
+  if(CFG.follow){
+    CFG.follow=0; saveCfg();
+    log('a hallgatás közbeni feldolgozás is kikapcsolva — különben pár másodperc '+
+        'múlva magától újraindult volna (⋯ → felismerés és fordítás alatt bekapcsolható)');
+    toast('leállítva — a hallgatás közbeni feldolgozás is kikapcsolt',6000);
+  }
   MOTOR.varasIg=0; GATE.on=false;
   log('MOTOR: leállítva'+(ok?' ('+ok+')':'')+(n?' — '+n+' feladat eldobva':''));
   motorFgOff();
@@ -5552,10 +5571,14 @@ async function motorTr(t,rec){
 function motorSet(t,rec,cim,uz){
   MOTOR.eletjel=Date.now();
   MOTOR.hiba='';
-  const nev=String((rec&&rec.name)||'').slice(0,42);
-  const span=Math.max(1,(t.b||0)-(t.kezdA!=null?t.kezdA:0));
   MOTOR.cim=cim; MOTOR.uzenet=uz;
-  MOTOR.nev=nev;
+  MOTOR.nev=String((rec&&rec.name)||'').slice(0,42);
+  /* v127: a százalék a RÉSZ egészére vonatkozik (mennyi van felismerve),
+     nem az épp futó szeletre. Eddig egy 40 másodperces maradék is „2%”-nak
+     látszott, mintha semmi nem haladt volna. */
+  MOTOR.pct=(rec&&rec.dur>1)?Math.min(100,doneSec(rec.done||[])/rec.dur*100):null;
+  MOTOR.mondat=(rec&&(rec.sen||[]).length)||0;
+  MOTOR.huHiany=rec?(rec.sen||[]).filter(x=>!x.hu).length:0;
   motorPanel();
 }
 /* ══════════ A MUNKÁS ══════════ */
@@ -5595,6 +5618,7 @@ async function motorLoop(){
         ujra=motorHiba(t,e);
       }
       MOTOR.feladat=null;
+      if(MOTOR.elvet===t.id){ MOTOR.elvet=0; ujra=false }   /* v127: elvetve */
       if(ujra&&!MOTOR.stop&&gen===MOTOR.gen){ MOTOR.sor.push(t) }
       else if(!ujra&&t.k==='asr'&&t.veg){ try{ t.veg() }catch(e){} }
       motorPanel();
@@ -5865,8 +5889,28 @@ function gateMiert(){
    INDÍTÓK — mindenki csak a sorba tesz
    ══════════════════════════════════════════════════════════════════════════ */
 /* teljes feldolgozás: felismerés elejétől a végéig (fordítással vagy anélkül) */
-function motorTeljes(rec,tr,a,b){
+async function motorTeljes(rec,tr,a,b){
   rec=rec||REC; if(!rec) return;
+  /* ══ v127: INDÍTÁS ELŐTT MEGNÉZZÜK, HOZZÁÉR-E A PROGRAM ══
+     Eddig a felismerés vakon elindult, és ha a fájl nem volt olvasható, csak
+     annyi látszott, hogy „nem csinál semmit”. Most előbb mérünk, és ha kell,
+     magunktól bemásoljuk a hangot — a felhasználó pedig MEGTUDJA, mi történik. */
+  if(rec.hangOk!==1||!rec.hangAt||Date.now()-rec.hangAt>6*3600000){
+    toast('megnézem, hozzáér-e a program ehhez a hanghoz…',3000);
+    let pr=await hangProba(rec,true);
+    if(!pr.ok&&mappaVan()){
+      log('a hang nem használható ('+pr.mi+') — bemásolom a telefonra, aztán indul a felismerés');
+      delete MASOLT[rec.id];
+      if(await hangBemasol(rec,pr.mi)) pr=await hangProba(rec,true);
+    }
+    drawLib();
+    if(!pr.ok){
+      log('a felismerés nem indul: '+pr.mi);
+      return toast('ezzel a hanggal nem tud dolgozni a program: '+pr.mi+
+        ' — a részletek a ⚙ hibanaplóban',9000);
+    }
+    log('a hang rendben, indul a felismerés: '+String(rec.name||'').slice(0,40));
+  }
   const dur=rec.dur||A.duration||0;
   const t=motorPush({k:'asr',rec:rec.id,a:a||0,b:(b||dur||1e9),pri:PRI.asrKez,
     tr:tr?1:0,cim:'felismerés'});
@@ -5942,11 +5986,15 @@ function motorPanel(){
       progSet(null,'sorban',(MOTOR.miert||'indul')+(sor?' · '+sor+' feladat vár':''));
       return;
     }
-    const teljes=Math.max(1,(t.b||0)-(t.kezdA||0));
-    const kesz=Math.max(0,Math.min(1,((t.a||0)-(t.kezdA||0))/teljes));
-    progSet(Math.max(2,kesz*100),(MOTOR.cim||t.cim||'feldolgozás'),
+    const pct=(MOTOR.pct==null)
+      ?Math.max(2,Math.min(1,((t.a||0)-(t.kezdA||0))/Math.max(1,(t.b||0)-(t.kezdA||0)))*100)
+      :Math.max(1,MOTOR.pct);
+    progSet(pct,(MOTOR.cim||t.cim||'feldolgozás'),
       (MOTOR.nev?MOTOR.nev+' · ':'')+(MOTOR.uzenet||'')+
-      (MOTOR.miert?' · '+MOTOR.miert:'')+(sor?' · +'+sor+' a sorban':''));
+      (MOTOR.mondat?' · '+MOTOR.mondat+' mondat kész':'')+
+      (MOTOR.huHiany?' · '+MOTOR.huHiany+' fordításra vár':'')+
+      (MOTOR.miert?' · '+MOTOR.miert:'')+
+      (sor?' · még '+sor+' feladat vár':''));
   }catch(e){}
 }
 setInterval(()=>{ try{ motorPanel() }catch(e){} },1500);
@@ -7356,6 +7404,66 @@ const HANGSZO={benn:'a telefonon',mappa:'a mappából',nincs:'nincs hang',yt:'Yo
 /* A mappa beolvasása után minden felvételhez bekötjük a hangot, amit megtalálunk.
    Eddig ez csak megnyitáskor történt meg, ezért a könyvtárban semmi nem látszott,
    és a sorozat-előfelismerés is „nincs meg a fájl”-lal esett ki. */
+/* ══════════════════════════════════════════════════════════════════════════
+   v127: „JÓ HELYEN VAN-E?” — MÉRVE, NEM FELTÉTELEZVE
+   A kérdés jogos: eddig semmi nem mutatta, hogy egy résszel tud-e dolgozni a
+   program. Innentől megpróbáljuk: kiolvasunk 16 bájtot, és (mélyebb próbánál)
+   meg is nyitjuk a hangot. Az eredmény a felvételen marad, és a polcon
+   látszik:  ✓ mehet  ·  ✗ + az ok  ·  (nincs mérés: honnan jön a hang)
+   ══════════════════════════════════════════════════════════════════════════ */
+async function hangProba(rec,melyen){
+  let ok=false, mi='';
+  try{
+    const f=await motorFajl(rec);
+    if(!f) mi=mappaVan()?'nincs meg a mappában':'nincs bekötve';
+    else{
+      if(f.saf) await safReadOne(f.saf,0,16);       /* olvasható-e egyáltalán */
+      if(melyen){
+        const M=await openMedia(f,()=>{});
+        if(M.kind==='whole'&&!(M.dur>1)) mi='nem szeletelhető';
+        else{ ok=true; if(!(rec.dur>1)&&M.dur>1) rec.dur=M.dur }
+      }else ok=true;
+    }
+  }catch(e){ mi=String(e&&(e.message||e)).slice(0,50) }
+  rec.hangOk=ok?1:0; rec.hangHiba=ok?'':mi; rec.hangAt=Date.now();
+  try{ if(REC&&REC.id===rec.id) await save(rec); else await txtPut(rec) }catch(e){}
+  return {ok:ok,mi:mi};
+}
+/* az egész könyvtár átvizsgálása — egy koppintás, és minden csempén ott a jelölés */
+async function hangVizsgal(recs){
+  let all=recs;
+  if(!all){ try{ all=await txtAll() }catch(e){ return } }
+  all=(all||[]).filter(r=>r&&r.kind!=='yt');
+  if(!all.length) return toast('nincs vizsgálható rész');
+  MOTOR.szunet=true;                       /* a motor addig ne olvasson bele */
+  progShow(true); $('progHide').classList.add('hid');
+  let jo=0; const bajos=[];
+  log('hangfájlok vizsgálata: '+all.length+' rész');
+  for(let i=0;i<all.length;i++){
+    if(MOTOR.stop) break;
+    progSet(i/all.length*100,'hangfájlok vizsgálata',
+      (i+1)+' / '+all.length+' · '+String(all[i].name||'').slice(0,34));
+    const r=await hangProba(all[i],false);
+    if(r.ok) jo++; else bajos.push(all[i]);
+    if(i%10===9) drawLib();
+  }
+  MOTOR.szunet=false;
+  progShow(false);
+  drawLib();
+  log('vizsgálat kész: '+jo+' rendben, '+bajos.length+' bajos');
+  if(!bajos.length) return toast(jo+' rész rendben — mindegyikkel tud dolgozni a program',7000);
+  sheet('vizsgálat kész',[
+    {note:jo+' rész rendben van. '+bajos.length+' résszel nem tud dolgozni a program: '+
+      bajos.slice(0,6).map(r=>String(r.name||'').slice(0,28)+' ('+(r.hangHiba||'?')+')').join(' · ')+
+      (bajos.length>6?' …':'')},
+    mappaVan()?{t:'a '+bajos.length+' bajos rész hangjának bemásolása a telefonra',pri:1,
+      fn:async()=>{ closeSheet();
+        for(const r of bajos){ delete MASOLT[r.id];
+          if(await hangBemasol(r,r.hangHiba||'vizsgálat')) await hangProba(r,false); }
+        drawLib(); toast('bemásolás kész',5000); }}:null,
+    {t:'most nem',fn:()=>closeSheet()}
+  ]);
+}
 async function folderBind(){
   if(!mappaVan()||!(FOLDER||[]).length) return 0;
   let all=[];
@@ -7643,6 +7751,9 @@ async function folderOpen(f){
 }
 $('folderPick').onclick=folderPick;
 $('folderScan').onclick=()=>folderScan();
+/* v127: egy koppintás, és minden csempén ott lesz, hogy tud-e vele dolgozni a
+   program (✓ mehet / ✗ + az ok) */
+$('folderCheck').onclick=()=>{ hangVizsgal().catch(e=>log('vizsgálat hiba:',e)) };
 $('folderLists').onclick=()=>folderLists(false);
 $('fPickAll').onclick=()=>pickAll(true);
 $('fPickNone').onclick=()=>pickAll(false);
@@ -7864,6 +7975,24 @@ async function openRec(rec,fileMaybe){
       log('időrend rendezve megnyitáskor: '+ig+' igazítás'+(holt?', '+holt+' halott mondat':''));
     }
     if(mig||ig) txtPut(strip(rec)).catch(e=>log('megnyitási rendezés mentése:',e));
+  }
+  /* ══ v127: MÁSIK RÉSZRE LÉPVE AZ ELŐZŐ MUNKÁJA ELMEGY ══
+     Ha átlépsz egy másik epizódra, nem az érdekel, ami az előzőn futott. A régi
+     rész sürgős feladatait eldobjuk, a futót megszakítjuk. A háttérben menő
+     sorozat-előfelismerés (a legalacsonyabb rangú munka) marad, mert az
+     szándékosan hosszú távú. */
+  if(REC&&REC.id!==rec.id){
+    try{
+      const n=motorDrop(x=>x.rec!==rec.id&&x.pri<PRI.sor);
+      const f=MOTOR.feladat;
+      if(f&&f.rec!==rec.id&&f.pri<PRI.sor){
+        MOTOR.elvet=f.id;
+        keresAbort('másik részre léptél');
+      }
+      if(n||MOTOR.elvet) log('másik részre léptél — az előző rész munkája eldobva'+
+        (n?' ('+n+' feladat)':''));
+      GATE.on=false;
+    }catch(e){}
   }
   REC=rec; CUR=-1; loopA=loopB=null; MED=null;
   document.body.classList.add('playing');
@@ -8859,8 +8988,14 @@ function bkCard(r,part){
   /* v121: a hang FORRÁSA látszik, nem csak a hiánya. A mappából érkező hang
      teljes értékű — eddig „hang ✗”-et kapott, ami félrevezetett. */
   const hol=hangHol(r);
-  const mark=hol==='yt'?' · YT':hol==='mappa'?' · <span class="pill">mappa</span>'
-    :hol==='nincs'?' · hang ✗':'';
+  /* v127: ha megmértük, azt mutatjuk — különben csak azt, honnan jön a hang */
+  const mark=hol==='yt'?' · YT'
+    :(r.hangAt&&r.hangOk===1)?' · <span class="pill ok">✓ mehet</span>'
+    :(r.hangAt&&r.hangOk===0)?' · <span class="pill bad">✗ '+
+        String(r.hangHiba||'nem olvasható').slice(0,22)+'</span>'
+    :hol==='mappa'?' · <span class="pill">mappa</span>'
+    :hol==='benn'?' · <span class="pill">telefonon</span>'
+    :' · <span class="pill bad">nincs hang</span>';
   /* v56: a 0% nem hír — jelvény csak akkor, ha tényleg folyamatban van; szöveg
      nélküli felvételnél a hiányt mondjuk ki (a „hang ✗" mintájára) */
   /* v111: a csempék alól kikerült a mono adatsor — a polc így levegősebb és
@@ -9275,6 +9410,20 @@ $('pMore').onclick=()=>{
     (REC&&REC.sen&&REC.sen.length)?{t:'szöveg törlése ('+REC.sen.length+' mondat)',
       fn:()=>wipeText(REC)}:null,
     {t:'szöveg betöltése fájlból (SRT / TSV)',fn:()=>askImport(REC)},
+    {t:'ennek a résznek a hangja jó helyen van-e? (mérés)',fn:async()=>{
+      closeSheet();
+      toast('mérem…',2500);
+      const r=await hangProba(REC,true);
+      drawLib();
+      if(r.ok) toast('✓ ehhez a részhez hozzáér a program, dolgozhat vele',6000);
+      else{
+        log('a rész hangja nem használható: '+r.mi);
+        if(mappaVan()){ delete MASOLT[REC.id];
+          if(await hangBemasol(REC,r.mi)){ await hangProba(REC,true); drawLib();
+            return toast('✗ a mappából nem volt olvasható — bemásoltam a telefonra, most már megy',8000) } }
+        toast('✗ nem használható: '+r.mi,8000);
+      }
+    }},
     {t:'műhely — szöveg, feliratok, borítók, kivitel',fn:sheetShop},
     {t:'bezárás',fn:closeRec}
   ]);
@@ -10156,6 +10305,10 @@ function sheetItem(r){
       A.currentTime=0; A.play().catch(()=>{}) }},
     {t:'hangfájl behúzása ehhez',fn:()=>{ ONEFILE=true; $('file').click() }},
     {t:'szöveg betöltése (SRT / kétnyelvű TSV)',fn:()=>askImport(r)},
+    {t:'a hangja jó helyen van-e? (mérés)',fn:async()=>{ closeSheet();
+      const pr=await hangProba(r,true); drawLib();
+      toast(pr.ok?'✓ ezzel a résszel tud dolgozni a program'
+        :'✗ nem használható: '+pr.mi,7000) }},
     {t:'borító beállítása képből',fn:()=>askCover(r)},
     {t:'újrafordítás a beállított motorral',fn:()=>reTranslate(r)},
     {t:'kivitel: kétnyelvű TSV',fn:()=>exportTsv(r)},
