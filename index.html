@@ -1237,7 +1237,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v127';
+const APP_VER='v128';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -5275,6 +5275,28 @@ async function runFix(rec,M){
 
 let MOTOR_ID=0;
 const MOTOR_HOLT_MS=3*60*1000;      /* ennyi mozdulatlanság után halottnak vesszük */
+const LEPES_MAX=4*60*1000;          /* egy lépés (szelet) ennél tovább nem tarthat */
+/* ══════════ v128: FÁZISOK — MÉRVE ══════════
+   A napló szerint a munkás három percig „nem adott életjelet”, pedig dolgozott:
+   egy 33 MB-os mp3 szeletelése (PCM-dekódolás + beszédszünet-keresés) a
+   telefonon lassú, és eddig semmit nem jelzett. Innentől minden fázisnak van
+   neve, órája és szívverése — látszik, MI tart sokáig, és ha valami tényleg
+   beragad, a lépés órája elvágja. */
+function fazis(nev){
+  MOTOR.fazis=nev; MOTOR.fazisKezd=Date.now(); MOTOR.eletjel=Date.now();
+  motorPanel();
+}
+function fazisVeg(nev){
+  const ms=Date.now()-(MOTOR.fazisKezd||Date.now());
+  MOTOR.eletjel=Date.now();
+  if(ms>20000) log('MOTOR: '+(nev||MOTOR.fazis||'lépés')+' — '+Math.round(ms/1000)+' s');
+  return ms;
+}
+/* amíg fut egy feladat, kétmásodpercenként életjelet adunk, hogy az őrszem ne
+   higgye halottnak — a valódi felső korlát a lépés órája */
+setInterval(()=>{
+  try{ if(MOTOR.feladat&&MOTOR.fut){ MOTOR.eletjel=Date.now(); motorPanel() } }catch(e){}
+},2000);
 const MOTOR_SZELET=()=>Math.max(60,(CFG.chunkMin||5)*60);
 const MOTOR_MINSZ=20;               /* ennél rövidebb maradékot nem küldünk fel */
 
@@ -5484,21 +5506,35 @@ async function motorAsr(t,rec){
     log('MOTOR: kvótakímélés — '+Math.round(var_/1000)+' s szünet ('+asrSpentTxt()+')');
     return true;
   }
+  fazis('a hang megnyitása');
   const M=await MOTOR.hiv.media(rec);
+  fazisVeg('a hang megnyitása');
   const ov=Math.max(t.a,t0-(t0>t.a?1.5:0));       /* átfedés, hogy ne törjön mondat */
   motorSet(t,rec,'felismerés',fmtT(t0)+' → '+fmtT(t1));
   let piece;
+  fazis('szeletelés');
   try{ piece=await MOTOR.hiv.vag(M,ov,t1,true) }
   catch(e){ throw new Error('a hang szeletelése nem sikerült: '+String(e&&(e.message||e)).slice(0,80)) }
+  const vagMs=fazisVeg('szeletelés '+fmtT(t0)+'–'+fmtT(t1));
+  /* ha a szeletelés lassú (öreg/lassú telefon, nagy fájl), magunktól kisebb
+     szeletekre váltunk — így a program haladni fog, csak több kéréssel */
+  if(vagMs>75000&&(CFG.chunkMin||5)>2){
+    CFG.chunkMin=Math.max(2,Math.round((CFG.chunkMin||5)/2)); saveCfg();
+    log('MOTOR: a szeletelés lassú ezen a telefonon — a szeletméret '+
+        CFG.chunkMin+' percre állítva (több kérés, de haladunk)');
+  }
   if(piece.blob.size>24*1024*1024){
     log('MOTOR: a '+fmtT(t0)+'–'+fmtT(t1)+' szelet '+fmtMB(piece.blob.size)+
         ' — a felismerő 25 MB-ig fogad; állítsd kisebbre a szeletméretet (⚙)');
     rec.done=mergeDone(rec.done,t0,t1); await save(rec); t.a=t1; return true;
   }
   let d=null;
+  fazis('felismerés');
   try{
     d=await MOTOR.hiv.asr(piece.blob,piece.name,piece.t1-piece.t0,CFG.hint===0?'':(t.hint||''));
+    fazisVeg('felismerés '+fmtMB(piece.blob.size));
   }catch(e){
+    fazisVeg('felismerés (hibával)');
     /* ══ EGY ROSSZ SZELET NEM ÁLLÍT MEG SEMMIT ══
        400 = a felismerő nem tudott mit kezdeni a hanggal (üres, csonka,
        formátumhiba). Lezárjuk késznek, és megyünk tovább; a régi rendszerben
@@ -5545,7 +5581,9 @@ async function motorTr(t,rec){
   }
   if(!need.length) return false;
   motorSet(t,rec,'fordítás',need.length+' mondat · '+fmtT(need[0].a));
+  fazis('fordítás');
   const n=await fillHu(need,null,()=>MOTOR.stop);
+  fazisVeg('fordítás '+need.length+' mondat');
   if(cacheDirty) saveCache();
   if(n){
     await save(rec);
@@ -5612,7 +5650,20 @@ async function motorLoop(){
       let ujra=false;
       try{
         const rec=await motorRec(t.rec);
-        ujra=(t.k==='tr')?await motorTr(t,rec):await motorAsr(t,rec);
+        /* v128: egy lépés (egy szelet vagy egy korty fordítás) nem tarthat
+           örökké — ha mégis, elvágjuk, és a napló megmondja, melyik fázisban */
+        let ora=null;
+        const oraP=new Promise((_,rej)=>{ ora=setTimeout(()=>{
+          keresAbort('lépés-időkorlát');
+          rej(new Error('a lépés '+Math.round(LEPES_MAX/60000)+' perc alatt sem készült el'+
+            (MOTOR.fazis?' ('+MOTOR.fazis+' fázisban)':'')));
+        },LEPES_MAX) });
+        try{
+          ujra=await Promise.race([
+            (t.k==='tr')?motorTr(t,rec):motorAsr(t,rec),
+            oraP
+          ]);
+        }finally{ clearTimeout(ora) }
         MOTOR.hibaSzam[t.rec]=0;
       }catch(e){
         ujra=motorHiba(t,e);
@@ -5989,7 +6040,9 @@ function motorPanel(){
     const pct=(MOTOR.pct==null)
       ?Math.max(2,Math.min(1,((t.a||0)-(t.kezdA||0))/Math.max(1,(t.b||0)-(t.kezdA||0)))*100)
       :Math.max(1,MOTOR.pct);
-    progSet(pct,(MOTOR.cim||t.cim||'feldolgozás'),
+    const fz=MOTOR.fazis?(MOTOR.fazis+' '+
+      Math.round((Date.now()-(MOTOR.fazisKezd||Date.now()))/1000)+' s'):'';
+    progSet(pct,(MOTOR.cim||t.cim||'feldolgozás')+(fz?' · '+fz:''),
       (MOTOR.nev?MOTOR.nev+' · ':'')+(MOTOR.uzenet||'')+
       (MOTOR.mondat?' · '+MOTOR.mondat+' mondat kész':'')+
       (MOTOR.huHiany?' · '+MOTOR.huHiany+' fordításra vár':'')+
