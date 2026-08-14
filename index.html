@@ -1237,7 +1237,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v128';
+const APP_VER='v129';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -1421,10 +1421,34 @@ const medDel=id=>dbOp('media','readwrite',st=>st.delete(id));
 const ADB={p:null};
 function adb(){
   if(ADB.p) return ADB.p;
-  ADB.p=idbOpen('hallgato-hang',1,d=>{
+  /* v129: 2-es verzió az 'idx' tárolóért — ide kerül a hangfájlok keretindexe.
+     Egy 7 órás mp3 indexelése percekbe telik; ha egyszer megvan, többé nem
+     kell újra felépíteni (a hang mellé tartozik, nem a szöveghez). */
+  ADB.p=idbOpen('hallgato-hang',2,d=>{
     if(!d.objectStoreNames.contains('aud')) d.createObjectStore('aud',{keyPath:'k'});
+    if(!d.objectStoreNames.contains('idx')) d.createObjectStore('idx',{keyPath:'k'});
   }).catch(e=>{ ADB.p=null; throw e });
   return ADB.p;
+}
+function idxOp(mode,fn){
+  return adb().then(d=>new Promise((res,rej)=>{
+    const t=d.transaction('idx',mode), st=t.objectStore('idx');
+    let out; try{ out=fn(st) }catch(e){ rej(e); return }
+    t.oncomplete=()=>res(out&&out.result!==undefined?out.result:out);
+    t.onerror=t.onabort=()=>rej(t.error||new Error('index-tároló hiba'));
+  }));
+}
+const idxKey=file=>'i|'+String(file&&file.name||'').slice(0,80)+'|'+(file&&file.size||0);
+async function idxGet(file){
+  try{ return await idxOp('readonly',st=>st.get(idxKey(file))) }catch(e){ return null }
+}
+async function idxPut(file,M){
+  try{
+    if(!M||!M.offs||M.n<200) return;          /* rövid fájlnál nem érdemes */
+    await idxOp('readwrite',st=>st.put({k:idxKey(file),kind:M.kind,dur:M.dur,n:M.n,
+      offs:M.offs,lens:M.lens,times:M.times,at:Date.now()}));
+    log('a hang keretindexe eltárolva ('+M.n+' keret) — legközelebb azonnal megnyílik');
+  }catch(e){ log('az index tárolása nem sikerült: '+String(e&&(e.message||e)).slice(0,60)) }
 }
 function audOp(mode,fn){
   return adb().then(d=>new Promise((res,rej)=>{
@@ -1603,9 +1627,24 @@ async function safHttp(url,s,e){
   }
   throw last||new Error('a mappából nem olvasható');
 }
+/* ══════════ v129: A NAGY OLVASÁSOK A HTTP-ÚTON MENNEK ══════════
+   A napló megmutatta: a natív bridge egy 2 MB-os kérésnél 12 másodperc alatt
+   sem válaszolt (a plugin szöveggé kódolva adja át a bájtokat — nagy darabnál
+   ez fáj). Az indexeléshez száz ilyen blokk kell, ezért tartott a megnyitás
+   végtelenségig. A natív út a kis olvasásokra jó (fejlécek, ellenőrzés); a
+   nagyokat a helyi kiszolgáló bájt-tartománnyal sokkal gyorsabban adja. */
+const SAF_NAGY=192*1024;
 async function safRange(src,s,e){
   const len=Math.max(0,e-s);
   if(!len) return new Uint8Array(0);
+  if(len>SAF_NAGY){
+    const url0=src.url||safUrl(src.saf);
+    if(url0){
+      try{ return await safHttp(url0,s,e) }
+      catch(err){ log('nagy olvasás HTTP-n nem sikerült ('+
+        String(err&&(err.message||err)).slice(0,60)+') — natív úton próbálom') }
+    }
+  }
   if(SAF_READ!==false&&MAPPA&&MAPPA.read&&src.saf){
     try{
       const u=await safBridge(src.saf,s,len);
@@ -1940,7 +1979,20 @@ async function mp3Open(file,onMsg){
   let off=0;
   const h=await readSlice(file,0,10);
   if(h[0]===0x49&&h[1]===0x44&&h[2]===0x33) off=10+((h[6]&127)<<21|(h[7]&127)<<14|(h[8]&127)<<7|(h[9]&127));
-  const fr=[]; const times=[0];
+  /* ══════════ v129: TIPIZÁLT TÖMBÖK ══════════
+     Egy 7 órás mp3 közel egymillió keretből áll. Eddig minden keret egy külön
+     JS-objektum lett ({o,len}), és a lista építése a telefonon percekig tartott
+     (a naplóban „a hang megnyitása 124 s”). Két számtömbbe gyűjtjük ugyanezt:
+     ugyanaz az adat, töredék idő és memória alatt. */
+  let cap=Math.max(4096,Math.ceil(file.size/384));
+  let offs=new Uint32Array(cap), lens=new Uint16Array(cap), tms=new Float64Array(cap+1);
+  let n=0;
+  const nagyobb=()=>{
+    cap=Math.ceil(cap*1.6);
+    const o2=new Uint32Array(cap); o2.set(offs); offs=o2;
+    const l2=new Uint16Array(cap); l2.set(lens); lens=l2;
+    const t2=new Float64Array(cap+1); t2.set(tms); tms=t2;
+  };
   let pos=off, t=0, buf=null, bufAt=0;
   const BS=1<<21;
   while(pos<file.size-4){
@@ -1973,18 +2025,24 @@ async function mp3Open(file,onMsg){
       const tag=n0===0x54&&n1===0x41&&buf[o+len+2]===0x47;
       if(!sync&&!tag){ pos++; continue }
     }
-    fr.push({o:pos,len});
-    t+=spf/sr; times.push(t);
+    if(n>=cap) nagyobb();
+    offs[n]=pos; lens[n]=len; n++;
+    t+=spf/sr; tms[n]=t;
     pos+=len;
   }
-  if(fr.length<10) return null;
-  return {kind:'mp3',file,dur:t,n:fr.length,fr,times:Float64Array.from(times)};
+  if(n<10) return null;
+  return {kind:'mp3',file,dur:t,n:n,
+          offs:offs.subarray(0,n), lens:lens.subarray(0,n),
+          times:tms.subarray(0,n+1)};
 }
+/* a keretek elérése: az új (tömbös) és a régi (objektumos) alakot is kezeli */
+const frOff=(M,i)=>M.offs?M.offs[i]:M.fr[i].o;
+const frLen=(M,i)=>M.lens?M.lens[i]:M.fr[i].len;
 async function cutMp3(M,t0,t1){
   let i0=lowerBound(M.times,t0,M.n), i1=lowerBound(M.times,t1,M.n);
   if(i0>0&&M.times[i0]>t0) i0--;
   if(i1<=i0) i1=Math.min(M.n,i0+1);
-  const a=M.fr[i0].o, b=M.fr[i1-1].o+M.fr[i1-1].len;
+  const a=frOff(M,i0), b=frOff(M,i1-1)+frLen(M,i1-1);
   return {blob:new Blob([await safBlob(M.file.slice(a,b))],{type:'audio/mpeg'}), name:'r.mp3',
           t0:M.times[i0], t1:M.times[i1]};
 }
@@ -2179,7 +2237,7 @@ async function cutAdts(M,t0,t1){
   let i0=lowerBound(M.times,t0,M.n), i1=lowerBound(M.times,t1,M.n);
   if(i0>0&&M.times[i0]>t0) i0--;
   if(i1<=i0) i1=Math.min(M.n,i0+1);
-  const a=M.fr[i0].o, b=M.fr[i1-1].o+M.fr[i1-1].len;
+  const a=frOff(M,i0), b=frOff(M,i1-1)+frLen(M,i1-1);
   return {blob:new Blob([await safBlob(M.file.slice(a,b))],{type:'audio/aac'}),name:'r.aac',
           t0:M.times[i0],t1:M.times[i1]};
 }
@@ -2188,6 +2246,14 @@ async function cutAdts(M,t0,t1){
 async function openMedia(file,onMsg){
   const ext=(file.name||'').toLowerCase().replace(/^.*\./,'');
   log('megnyitás:',file.name||'?',fmtMB(file.size||0));
+  /* v129: ha ezt a fájlt már indexeltük egyszer, kész van — hosszú
+     hangjátékoknál ez perceket takarít meg minden megnyitásnál */
+  const cache=await idxGet(file);
+  if(cache&&cache.offs&&cache.n>10){
+    log('a keretindex a tárolóból ('+cache.n+' keret · '+fmtT(cache.dur||0)+')');
+    return {kind:cache.kind||'mp3',file,dur:cache.dur,n:cache.n,
+            offs:cache.offs,lens:cache.lens,times:cache.times};
+  }
   const why=[], tried={};
   const attempt=async(name,fn)=>{
     if(tried[name]) return null; tried[name]=1;
@@ -2203,6 +2269,7 @@ async function openMedia(file,onMsg){
         ||await attempt('mp3',()=>mp3Open(file,onMsg))
         ||await attempt('adts',()=>adtsOpen(file,onMsg))
         ||await attempt('wav',()=>wavOpen(file));
+  if(M&&M.offs&&M.n>=200) idxPut(file,M);      /* v129: legyen meg legközelebb is */
   if(!M){
     /* semmelyik bontó nem ismerte fel: a hang csak egészben küldhető el */
     const dur=await attempt('lejátszó',()=>probeDur(file));
@@ -5653,17 +5720,22 @@ async function motorLoop(){
         /* v128: egy lépés (egy szelet vagy egy korty fordítás) nem tarthat
            örökké — ha mégis, elvágjuk, és a napló megmondja, melyik fázisban */
         let ora=null;
-        const oraP=new Promise((_,rej)=>{ ora=setTimeout(()=>{
+        /* v129: a hang megnyitása (keretindexelés) hosszú fájlnál sok perc lehet,
+           de EGYSZERI és utána eltároljuk — ezt nem szakítjuk meg. A korlát a
+           szeletelésre és a felismerésre vonatkozik. */
+        const oraP=new Promise((_,rej)=>{ ora=setInterval(()=>{
+          if(MOTOR.fazis==='a hang megnyitása') return;
+          if(Date.now()-(MOTOR.fazisKezd||Date.now())<LEPES_MAX) return;
           keresAbort('lépés-időkorlát');
-          rej(new Error('a lépés '+Math.round(LEPES_MAX/60000)+' perc alatt sem készült el'+
-            (MOTOR.fazis?' ('+MOTOR.fazis+' fázisban)':'')));
-        },LEPES_MAX) });
+          rej(new Error('a '+MOTOR.fazis+' fázis '+Math.round(LEPES_MAX/60000)+
+            ' perc alatt sem készült el'));
+        },5000) });
         try{
           ujra=await Promise.race([
             (t.k==='tr')?motorTr(t,rec):motorAsr(t,rec),
             oraP
           ]);
-        }finally{ clearTimeout(ora) }
+        }finally{ clearInterval(ora) }
         MOTOR.hibaSzam[t.rec]=0;
       }catch(e){
         ujra=motorHiba(t,e);
@@ -6040,8 +6112,9 @@ function motorPanel(){
     const pct=(MOTOR.pct==null)
       ?Math.max(2,Math.min(1,((t.a||0)-(t.kezdA||0))/Math.max(1,(t.b||0)-(t.kezdA||0)))*100)
       :Math.max(1,MOTOR.pct);
-    const fz=MOTOR.fazis?(MOTOR.fazis+' '+
-      Math.round((Date.now()-(MOTOR.fazisKezd||Date.now()))/1000)+' s'):'';
+    const fmp=Math.round((Date.now()-(MOTOR.fazisKezd||Date.now()))/1000);
+    const fz=MOTOR.fazis?(MOTOR.fazis+' '+fmp+' s'+
+      (MOTOR.fazis==='a hang megnyitása'&&fmp>25?' (egyszeri, hosszú hangnál lassú)':'')):'';
     progSet(pct,(MOTOR.cim||t.cim||'feldolgozás')+(fz?' · '+fz:''),
       (MOTOR.nev?MOTOR.nev+' · ':'')+(MOTOR.uzenet||'')+
       (MOTOR.mondat?' · '+MOTOR.mondat+' mondat kész':'')+
