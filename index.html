@@ -1230,7 +1230,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v124';
+const APP_VER='v125';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -1288,9 +1288,9 @@ addEventListener('unhandledrejection',e=>{
 var CFG=Object.assign({
   asr:'groq', asrKey:'', asrUrl:'', asrModel:'', chunkMin:5, words:1, pcm:1, vad:1, slice:'norm', hint:1,
   tr:'free', dlKey:'', clKey:'', clModel:'haiku', oaiUrl:'https://api.moonshot.ai/v1', oaiKey:'', oaiModel:'kimi-k2.6',
-  kfs:1.35, font:'lit', huMode:'split', rate:1, keepAudio:1, trMode:'all', follow:1,
+  kfs:1.35, font:'lit', huMode:'split', rate:1, keepAudio:1, trMode:'all', follow:0,
   /* v120 — a motor beállításai (mind percben / másodpercben) */
-  gate:1,           /* indítási kapu: amíg nincs kész szöveg a fej előtt, nem indul a hang */
+  gate:0,           /* indítási kapu: amíg nincs kész szöveg a fej előtt, nem indul a hang */
   gateSec:75,       /* mennyi kész (felismert ÉS lefordított) szöveg kell az indításhoz */
   aheadMin:10,      /* mennyi tartalékot tartson a kísérő a lejátszófej előtt */
   trAheadMin:6,     /* a fordítás ennyi perccel a fej előtt járjon */
@@ -1335,7 +1335,14 @@ if(CFG.huMode==='pin'){ CFG.huMode='split'; saveCfg(); }
 /* v120: az új motor a kísérő móddal és az indítási kapuval együtt kel életre —
    a régi beállításokon is egyszer bekapcsoljuk, mert ez az alapértelmezett
    használat (nyomsz egy play-t, és minden magától történik) */
-if(!CFG.motorV1){ CFG.motorV1=1; CFG.follow=1; CFG.gate=1; saveCfg(); }
+if(!CFG.motorV1){ CFG.motorV1=1; saveCfg(); }
+/* v125: MAGÁTÓL SEMMI NEM INDUL. A felismerés akkor kezdődik, amikor kéred:
+   a részen ⋯ → „felismerés és fordítás”. A kapu és a kísérő mód innentől
+   választható lehetőség, nem alapállapot — a lejátszást soha nem tartja
+   vissza semmi, amit nem te kapcsoltál be. */
+if(!CFG.motorV2){ CFG.motorV2=1; CFG.follow=0; CFG.gate=0; saveCfg();
+  setTimeout(()=>log('v125: a felismerés innentől csak kézzel indul '+
+    '(⋯ → felismerés és fordítás). A kapu és a kísérő mód ott kapcsolható be.'),1200); }
 var spend=Object.assign({asrSec:0,tin:0,tout:0,calls:0},J('hg_spend',{}));
 const saveSpend=()=>store.set('hg_spend',JSON.stringify(spend));
 var cache=J('hg_cache',{});        /* angol mondat -> magyar */
@@ -2521,18 +2528,38 @@ function postXhr(url,headers,body,ms){
     x.send(body);
   });
 }
+/* ══════════ v125: EGYETLEN LÓGÓ KÉRÉS SEM BÉNÍTHATJA MEG A PROGRAMOT ══════════
+   A régi kód `ms` időkorlátot kapott, de a fetch ág egyszerűen figyelmen kívül
+   hagyta — csak a tartalék XHR használta. Ha a felismerő nem válaszolt, a hívás
+   ÖRÖKRE ott állt; és mert a hívások egy soron mennek, utána már semmi más nem
+   indulhatott el. Innentől minden kérésnek van órája és megszakítója, és a
+   „minden leállítása” tényleg elvágja a folyamatban lévőt is. */
+const KEREK=new Set();
+function keresAbort(mit){
+  let n=0;
+  for(const c of KEREK){ try{ c.abort() }catch(e){} n++ }
+  KEREK.clear();
+  if(n) log('megszakítva '+n+' folyamatban lévő kérés'+(mit?' ('+mit+')':''));
+  return n;
+}
 async function postForm(url,headers,fd,ms){
+  ms=ms||180000;
+  const ac=new AbortController();
+  KEREK.add(ac);
+  const ora=setTimeout(()=>{ try{ ac.abort() }catch(e){} },ms);
   try{
-    const r=await fetch(url,{method:'POST',headers:headers,body:fd});
+    const r=await fetch(url,{method:'POST',headers:headers,body:fd,signal:ac.signal});
     return {ok:r.ok,status:r.status,body:await r.text(),
             hdr:k=>r.headers.get(k),via:'fetch'};
   }catch(err){
+    if(ac.signal.aborted)
+      throw new Error('a kiszolgáló '+Math.round(ms/1000)+' másodpercig nem válaszolt');
     log('kérés fetch-en elhasalt ('+String(err&&(err.message||err)).slice(0,60)+
         ') — XHR-rel újra');
     const r=await postXhr(url,headers,fd,ms);
     r.via='XHR'; if(r.ok) log('kérés XHR-en átment');
     return r;
-  }
+  }finally{ clearTimeout(ora); KEREK.delete(ac) }
 }
 /* ======== v84: KÉRÉS-ÜTEMEZÉS ========
    A v83-as napló megmutatta: a pótló futam kb. minden második kérése 429
@@ -2607,7 +2634,13 @@ function asrSpentTxt(){
 let ASRLANC=Promise.resolve();
 function asrCall(){
   const a=arguments;
-  const p=ASRLANC.then(()=>asrCallRaw.apply(null,a));
+  /* utolsó védvonal: ha bármi mégis lógna, a lánc 3 perc után továbbenged —
+     inkább egy hibás feladat, mint egy megbénult program */
+  const p=ASRLANC.then(()=>Promise.race([
+    asrCallRaw.apply(null,a),
+    new Promise((_,rej)=>setTimeout(()=>rej(
+      new Error('a felismerő hívás nem tért vissza időben')),180000))
+  ]));
   ASRLANC=p.then(()=>{},()=>{});
   return p;
 }
@@ -2631,8 +2664,10 @@ async function asrCallRaw(blob,fileName,secs,hintPrev,temp,opts){
      elhagyása és a más modell viszont valóban más eredményt ad. */
   if(hintPrev&&!opts.noPrompt) fd.append('prompt',hintPrev.slice(-200));
   await asrPace();                       /* v84: várakozás, MIELŐTT falnak megyünk */
+  /* az óra a szelet hosszához igazodik: 30 s alap + a hang hossza, 20–150 s közt */
+  const oraMs=Math.max(20000,Math.min(150000,30000+(secs||0)*1000));
   const r=await postForm(url+'/audio/transcriptions',
-    {'Authorization':'Bearer '+CFG.asrKey}, fd, 240000);
+    {'Authorization':'Bearer '+CFG.asrKey}, fd, oraMs);
   asrPaceFeed(r,r.ok);
   if(!r.ok){
     const t=String(r.body||'');
@@ -5286,7 +5321,9 @@ function motorEbreszt(){
 function motorStop(ok){
   const n=MOTOR.sor.length;
   MOTOR.sor=[]; MOTOR.stop=true; MOTOR.gen++; MOTOR.feladat=null;
-  MOTOR.futGen=0; MOTOR.fut=false;
+  MOTOR.futGen=0; MOTOR.fut=false; MOTOR.varasIg=0; MOTOR.miert='';
+  keresAbort('leállítás');          /* v125: a folyamatban lévő kérés is elvágva */
+  GATE.tilt=0; GATE.tiltRec=null;
   MOTOR.varasIg=0; GATE.on=false;
   log('MOTOR: leállítva'+(ok?' ('+ok+')':'')+(n?' — '+n+' feladat eldobva':''));
   motorFgOff();
@@ -8008,6 +8045,16 @@ async function addMany(files){
   if(!list.length) return;
   if(list.length===1) return addFileSafe(list[0]);
   const ossz=list.reduce((n,f)=>n+(f.size||0),0);
+  /* v125: ha a podcast-mappa ki van jelölve, a hangot NEM kell sehova másolni —
+     a program onnan dolgozik. Ilyenkor fel sem tesszük a kérdést. */
+  if(mappaVan()){
+    log('mappás használat: a '+list.length+' fájl hivatkozásként kerül be, '+
+        'a hang a kijelölt mappából jön (nincs másolás)');
+    for(const f of list){ await addFileSafe(f) }
+    toast(list.length+' rész a könyvtárban — a hang a mappából jön',5000);
+    drawLib();
+    return;
+  }
   const hang=await new Promise(res=>{
     sheet(list.length+' fájl behúzása',[
       {note:'Összesen '+fmtMB(ossz)+'. A készülékre mentés ennyi helyet foglal; '+
@@ -9437,25 +9484,35 @@ async function sheetProcess(){
   const nincsHu=(REC.sen||[]).filter(x=>!x.hu).length;
   const kell=CFG.asrKey&&FILE;
   const kis=CFG.follow
-    ?{t:'kísérő mód KI — a felismerés csak kézzel indul',fn:()=>{ CFG.follow=0; saveCfg();
+    ?{t:'hallgatás közbeni feldolgozás KI',fn:()=>{ CFG.follow=0; saveCfg();
         motorDrop(x=>x.pri===PRI.asrEl||x.pri===PRI.huEl);
-        toast('kísérő mód ki') }}
-    :{t:'kísérő mód BE — a szöveg magától '+(CFG.aheadMin||10)+
-        ' perccel a hallgatás előtt jár',pri:1,fn:()=>{ CFG.follow=1; saveCfg();
-        log('kísérő mód BE · '+(kiseroWhy()||'indulhat')); motorKisero();
-        toast('kísérő mód be',4000) }};
+        toast('kikapcsolva — innentől csak kézzel indul') }}
+    :{t:'hallgatás közben, '+(CFG.aheadMin||10)+' perces előnnyel — amíg hallgatod, '+
+        'a program előtted jár',fn:()=>{ CFG.follow=1; saveCfg();
+        log('hallgatás közbeni feldolgozás BE · '+(kiseroWhy()||'indulhat'));
+        motorKisero(); toast('bekapcsolva — hallgatás közben dolgozik',4500) }};
   const kapu=CFG.gate
-    ?{t:'indítási kapu KI — a hang akkor is elindul, ha még nincs szöveg',
-       fn:()=>{ CFG.gate=0; saveCfg(); GATE.on=false; toast('kapu ki') }}
-    :{t:'indítási kapu BE — a hang megvárja az első '+(CFG.gateSec||75)+
-        ' másodperc kész szövegét',fn:()=>{ CFG.gate=1; saveCfg(); toast('kapu be') }};
+    ?{t:'várakozás indítás előtt KI — a hang azonnal indul',
+       fn:()=>{ CFG.gate=0; saveCfg(); GATE.on=false; toast('a hang azonnal indul') }}
+    :{t:'várakozás indítás előtt BE — a hang megvárja az első '+(CFG.gateSec||75)+
+        ' másodperc kész szövegét',fn:()=>{ CFG.gate=1; saveCfg();
+        toast('a hang megvárja az első adag szöveget',5000) }};
   sheet('felismerés és fordítás',[
+    (function(){
+      const h=hangHol(REC);
+      if(h==='mappa') return {note:'A hang a kijelölt mappából jön — semmit nem kell '+
+        'sehova másolni vagy külön betölteni.'};
+      if(h==='benn') return {note:'A hang a telefon tárolójában van, a mappa nélkül is működik.'};
+      if(h==='yt') return {note:'YouTube-forrás.'};
+      return {note:'Ehhez a részhez nem találok hangfájlt — enélkül csak a meglévő '+
+        'szöveg fordítása megy. A könyvtárban húzd be, vagy jelöld ki a podcast-mappát.'};
+    })(),
     {note:'Állapot: '+motorAllapot()+'. A felismerés '+asrCur().name+'-en fut '+
       '('+asrSpentTxt()+'). Minden szelet után mentünk; a munka bármikor '+
       'megállítható és folytatható, egy rossz szelet nem állítja meg a sort, '+
       '429-nél a program kivár és magától folytatja.'},
     kis, kapu,
-    (kell&&gap)?{t:'teljes feldolgozás — felismerés + fordítás, elejétől a végéig'+
+    (kell&&gap)?{t:'AZ EGÉSZ RÉSZ feldolgozása most — felismerés + fordítás'+
       ' ('+fmtT(dur-doneSec(REC.done))+' van hátra)',pri:1,
       fn:()=>{ closeSheet(); motorTeljes(REC,1) }}:null,
     (kell&&gap)?{t:'csak felismerés (angol), fordítás nélkül',
