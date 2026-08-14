@@ -1230,7 +1230,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v123';
+const APP_VER='v124';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -5416,7 +5416,12 @@ async function motorAsr(t,rec){
     t.a=gap[1];
     return nextGap(rec.done,t.a,to)?true:false;
   }
-  const t1=Math.min(gap[1],t0+MOTOR_SZELET());
+  /* v124: az indítási kapu nem 5 percet vár — annyi hangot küld fel, amennyi
+     az induláshoz kell (~másfél perc). Így 10-20 másodperc alatt van szöveg,
+     és a hallgatás tényleg elindul. A háttérmunka marad a nagy szeleteknél,
+     mert az kevesebb kérésből dolgozik. */
+  const szelet=(t.pri===PRI.kapu)?Math.max(90,(CFG.gateSec||75)+30):MOTOR_SZELET();
+  const t1=Math.min(gap[1],t0+szelet);
   const var_=motorKvota(t1-t0);
   if(var_){
     MOTOR.varasIg=Date.now()+var_;
@@ -5692,6 +5697,11 @@ function gateCel(t,dur){ return Math.min(dur||1e9,(t||0)+(CFG.gateSec||75)) }
 /* '' = mehet a lejátszás; egyébként az ok, amiért még nem */
 function gateMi(t){
   if(!CFG.gate||!REC) return '';
+  /* v124: ha a kapu egyszer már elengedett ezen a részen, egy ideig nem szól
+     közbe. E nélkül végtelen kör lett: a biztosíték elengedte a hangot, a
+     „kifogyott a szöveg” őr egy másodperc múlva visszatette — és a hallgatás
+     soha nem indult el. */
+  if(GATE.tiltRec===REC.id&&GATE.tilt>Date.now()) return '';
   const dur=REC.dur||A.duration||0;
   if(!dur) return '';
   t=(t==null?(A.currentTime||0):t);
@@ -5711,7 +5721,9 @@ function gateMi(t){
    felismerő, kiesett a felvétel), a kapu nem tarthatja fogva a lejátszást:
    ennyi idő haladás nélkül elengedi, és MEGMONDJA, mi volt a baj. A hallgatás
    fontosabb, mint a tartalék. */
-const GATE_MAX=25000;
+const GATE_MAX=25000;          /* haladás nélkül ennyit vár */
+const GATE_MAX_MUNKA=150000;   /* de ha a motor ÉPP EZEN dolgozik, türelmesebb */
+const GATE_TILT=5*60000;       /* elengedés után ennyi ideig nem szól közbe újra */
 function gateIndit(mit){
   if(!REC) return;
   const t=A.currentTime||0, dur=REC.dur||A.duration||0;
@@ -5745,12 +5757,16 @@ setInterval(()=>{
         GATE.halad=fr2; GATE.hu=hu2; GATE.kezd=Date.now();
         return;
       }
-      if(Date.now()-(GATE.kezd||0)<GATE_MAX) return;
+      const dolgozik=MOTOR.feladat&&MOTOR.feladat.rec===REC.id;
+      const hatar=dolgozik?GATE_MAX_MUNKA:GATE_MAX;
+      if(Date.now()-(GATE.kezd||0)<hatar) return;
       /* ══ a biztosíték ══ */
       const ok=gateMiert();
       GATE.on=false;
-      log('kapu: '+Math.round(GATE_MAX/1000)+' másodpercig nem épült a tartalék ('+ok+
-          ') — elengedem, a lejátszás indul szöveg nélkül');
+      GATE.tiltRec=REC.id; GATE.tilt=Date.now()+GATE_TILT;
+      log('kapu: '+Math.round(hatar/1000)+' másodpercig nem épült a tartalék ('+ok+
+          ') — elengedem, a lejátszás indul szöveg nélkül; a kapu '+
+          Math.round(GATE_TILT/60000)+' percig nem szól közbe ezen a részen');
       toast('nem készül a szöveg: '+ok+' — elindítom a hangot, a részletek a ⚙ hibanaplóban',9000);
       motorPanel();
       _playRaw().then(()=>{
@@ -5771,7 +5787,12 @@ setInterval(()=>{
     }
     /* menet közbeni kifutás: ha a hang beérné a kész szöveget, megállunk és
        újratöltünk. 8 mp ráhagyás, hogy egy pillanatnyi hiány ne szakítson meg. */
-    if(CFG.gate&&REC&&!A.paused){
+    if(CFG.gate&&REC&&!A.paused&&!(GATE.tiltRec===REC.id&&GATE.tilt>Date.now())
+       &&(REC.sen||[]).length){
+      /* v124: csak ott van értelme „újratölteni”, ahol MÁR VAN szöveg és az
+         fogyott el. Ha a felvételen még egy mondat sincs, ez nem kifutás,
+         hanem a legelső felismerés — azt nem a lejátszás megállításával
+         gyorsítjuk. */
       const t=A.currentTime||0, dur=REC.dur||A.duration||0;
       if(dur&&t<dur-10){
         const fr=frontOf(REC.done,t);
@@ -5868,7 +5889,7 @@ function motorPanel(){
       progSet(Math.max(3,kesz*100),'előkészítés — '+(GATE.mit||''),
         'a hang akkor indul, ha megvan az első '+Math.round(cel-most)+' másodperc '+
         'szövege (most: '+fmtT(fr)+') · '+allj+
-        ' · ha nem halad, magától elindul','megszakítás');
+        ' · ha nem halad, magától elindul (vagy nyomd meg az „indítás így is”-t)','megszakítás');
       $('progGo').classList.remove('hid');
       return;
     }
