@@ -1230,7 +1230,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v125';
+const APP_VER='v126';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -7047,6 +7047,21 @@ function zonesShow(){
    esemény görgetés után nem keletkezik, ezért külön mozgásfigyelés nem kell. */
 document.addEventListener('click',e=>{
   if(!IMM||!document.body.classList.contains('playing')) return;
+  /* ══════════ v126: A ZÓNÁK NEM EHETIK MEG A GOMBOKAT ══════════
+     Ez a kezelő elfogási fázisban ül a dokumentumon, és mindent elnyel. Amíg
+     egy lap (menü), a hírfolyam vagy a beillesztő nyitva volt, a gombjaikra
+     koppintva nem a gomb futott le, hanem a zóna lapozott egy mondatot — a
+     menü használhatatlan volt hallgatás közben. A zónáknak csak ott van
+     dolguk, ahol nincs semmi más: nyitott réteg fölött és vezérlőn soha. */
+  /* csak a valódi átfedő rétegek számítanak — a nézetek (könyvtár, beállítások)
+     nem, mert azok fölött nem is fut a lejátszó */
+  const nyitva=['sheet','feed','paste'].some(id=>{
+    const el=$(id); return el&&el.classList.contains('on');
+  });
+  if(nyitva) return;
+  const t=e.target;
+  if(t&&t.closest&&t.closest('button,a,input,select,textarea,label,.item,.seg,'+
+     '#prog,#dock,#pl,header,#sheetBox,.bk')) return;
   /* v95: a v89-es „szünetben a pöcök átjut" viselkedés kivéve — a gyakorlatban
      zavaró volt. Elrejtett kezelőknél a pöcökhöz előbb vissza kell hozni a
      kezelőket (felső harmad koppintás). */
