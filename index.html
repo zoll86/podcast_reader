@@ -1237,7 +1237,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v131';
+const APP_VER='v132';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -6351,7 +6351,7 @@ function senHtml(s,i){
   /* v103: javító pöcök az angol buborékon — a CSS csak az aktuális mondaton
      mutatja, mint a magyar oldali újrafordítót */
   return '<div class="sen" data-i="'+i+'"><div class="en">'+en+'</div>'+
-    '<button class="fixb" title="ez a mondat gyanús — új felismerés és javítás">⟲</button>'+
+    '<button class="fixb" title="a mondat igazítása: időzítés, törlés, újrafelismerés">⋮</button>'+
     '<div class="hu">'+esc(s.hu||'')+'</div></div>';
 }
 /* csak az aktuális környezetet rajzoljuk ki: négyezer mondat DOM-ban akadna */
@@ -8046,7 +8046,7 @@ $('kara').addEventListener('click',e=>{
   if(fb){
     e.stopPropagation();
     const p=fb.closest('.sen');
-    if(p&&!isNaN(+p.dataset.i)) senFix(+p.dataset.i);
+    if(p&&!isNaN(+p.dataset.i)) sheetSen(+p.dataset.i);
     return;
   }
   const el=e.target.closest('.sen'); if(!el||el.classList.contains('gap')) return;
@@ -9611,6 +9611,10 @@ $('pMore').onclick=()=>{
       :'szöveg készítése (felismerés)',pri:1,fn:sheetProcess},
     /* v120: az „elejétől a végéig" fordító a napi menüben is — ez a leggyakoribb
        teendő a gépen készült (vagy mappából behúzott) SRT után */
+    (REC&&REC.sen&&REC.sen[CUR])?{t:'ennek a mondatnak az igazítása (időzítés, törlés)',
+      fn:()=>{ closeSheet(); sheetSen(CUR) }}:null,
+    (SENVISSZA&&REC&&SENVISSZA.id===REC.id)?{t:'az utolsó igazítás visszavonása ('+
+      SENVISSZA.mit+')',fn:()=>{ closeSheet(); senVisszavon() }}:null,
     (REC&&(REC.sen||[]).some(x=>!x.hu))?{t:'fordítás elejétől a végéig ('+
       (REC.sen.filter(x=>!x.hu).length)+' mondat)',pri:1,
       fn:()=>{ closeSheet(); motorForditMind(REC) }}:null,
@@ -9686,6 +9690,103 @@ async function wipeText(rec){
   drawLib();
   log('szöveg törölve: '+String(rec.name||'').slice(0,50)+' ('+n+' mondat)');
   toast('a szöveg törölve ('+n+' mondat) — felismerés nem indult',5000);
+}
+/* ══════════════════════════════════════════════════════════════════════════
+   v132: A MONDATOK KÉZI IGAZÍTÁSA
+   Két valós igény: (1) a felismerő néha „hall” valamit, ami nincs — az ilyen
+   buborékot ki kell tudni dobni; (2) a máshol készült leiratok (Whisper,
+   TurboScribe) időzítése elcsúszhat — akkor a kezdetet kell igazítani, sokszor
+   nem is egyesével, hanem innentől végig. Mindhárom művelet visszavonható,
+   amíg el nem hagyod a részt.
+   ══════════════════════════════════════════════════════════════════════════ */
+let SENVISSZA=null;           /* az utolsó igazítás előtti állapot */
+function senMent(rec,mit){
+  SENVISSZA={id:rec.id,mit:mit,sen:JSON.parse(JSON.stringify(rec.sen||[]))};
+}
+async function senVisszavon(){
+  if(!SENVISSZA||!REC||SENVISSZA.id!==REC.id) return toast('nincs mit visszavonni');
+  REC.sen=SENVISSZA.sen; SENVISSZA=null;
+  await save(REC);
+  CUR=-1; renderKara(true); try{ huBuild(); renderHu(true) }catch(e){}
+  drawSeek(); toast('visszavonva',3500);
+}
+async function senTorol(i){
+  if(!REC||!REC.sen||!REC.sen[i]) return;
+  const s=REC.sen[i];
+  senMent(REC,'törlés');
+  REC.sen.splice(i,1);
+  await save(REC);
+  if(CUR>=i) CUR=-1;
+  renderKara(true); try{ huBuild(); renderHu(true) }catch(e){}
+  drawSeek();
+  log('mondat törölve: '+fmtT(s.a)+' „'+String(s.en||'').slice(0,40)+'”');
+  toast('törölve — a ⋯ menüben visszavonható',5000);
+}
+/* a kezdet átállítása: az adott mondat kezdete ide kerül, a vége arányosan követi */
+async function senKezdet(i,uj){
+  if(!REC||!REC.sen||!REC.sen[i]) return;
+  const S=REC.sen, s=S[i];
+  const hossz=Math.max(0.4,(s.b||s.a+2)-(s.a||0));
+  senMent(REC,'kezdet');
+  const elott=i>0?(S[i-1].b||S[i-1].a||0):0;
+  s.a=Math.max(elott+0.05,Math.max(0,uj));
+  s.b=s.a+hossz;
+  if(i+1<S.length&&S[i+1].a<s.b) s.b=Math.max(s.a+0.4,S[i+1].a-0.05);
+  if(s.w&&s.w.length){ delete s.w }        /* a szó-időbélyegek elavultak */
+  S.sort((x,y)=>(x.a||0)-(y.a||0));
+  await save(REC);
+  CUR=-1; renderKara(true); try{ huBuild(); renderHu(true) }catch(e){}
+  drawSeek();
+  toast('a mondat kezdete: '+fmtT(s.a),4000);
+}
+/* eltolás: ettől a mondattól (vagy az egész résztől) minden időpont dt-vel */
+async function senTolas(i,dt,mind){
+  if(!REC||!REC.sen||!REC.sen.length) return;
+  const S=REC.sen;
+  senMent(REC,'eltolás');
+  const tol=(k)=>{
+    const s=S[k];
+    s.a=Math.max(0,(s.a||0)+dt);
+    s.b=Math.max(s.a+0.2,(s.b||s.a)+dt);
+    if(s.w&&s.w.length) s.w=s.w.map(x=>Math.max(0,x+dt));
+  };
+  if(mind) for(let k=0;k<S.length;k++) tol(k);
+  else for(let k=i;k<S.length;k++) tol(k);
+  await save(REC);
+  CUR=-1; renderKara(true); try{ huBuild(); renderHu(true) }catch(e){}
+  drawSeek();
+  const jel=(dt>0?'+':'')+dt.toFixed(1).replace('.',',')+' s';
+  log('időzítés eltolva '+jel+(mind?' (az egész rész)':' (innentől: '+fmtT(S[i]&&S[i].a)+')'));
+  toast('eltolva '+jel,4000);
+}
+/* a buborék menüje */
+function sheetSen(i){
+  if(!REC||!REC.sen||!REC.sen[i]) return;
+  const S=REC.sen, s=S[i];
+  const most=A.currentTime||0;
+  const kulonbseg=most-(s.a||0);
+  sheet(fmtT(s.a)+' · '+String(s.en||'').slice(0,44),[
+    {note:'„'+String(s.en||'').slice(0,150)+'”'+(s.hu?'  →  „'+String(s.hu).slice(0,150)+'”':'')},
+    {t:'a lejátszófej ide állítása',fn:()=>{ closeSheet(); gotoSen(i) }},
+    {head:'időzítés'},
+    {t:'a kezdet ide: '+fmtT(most)+(Math.abs(kulonbseg)>0.2
+        ?'  ('+(kulonbseg>0?'+':'')+kulonbseg.toFixed(1).replace('.',',')+' s)':''),
+      pri:1,fn:()=>{ closeSheet(); senKezdet(i,most) }},
+    {t:'fél másodperccel korábbra',fn:()=>{ closeSheet(); senKezdet(i,(s.a||0)-0.5) }},
+    {t:'fél másodperccel későbbre',fn:()=>{ closeSheet(); senKezdet(i,(s.a||0)+0.5) }},
+    (Math.abs(kulonbseg)>0.3)?{t:'INNENTŐL minden mondat eltolása '+
+      (kulonbseg>0?'+':'')+kulonbseg.toFixed(1).replace('.',',')+' s-mal',pri:1,
+      fn:()=>{ closeSheet(); senTolas(i,kulonbseg,false) }}:null,
+    (Math.abs(kulonbseg)>0.3)?{t:'az EGÉSZ rész eltolása '+
+      (kulonbseg>0?'+':'')+kulonbseg.toFixed(1).replace('.',',')+' s-mal',
+      fn:()=>{ closeSheet(); senTolas(i,kulonbseg,true) }}:null,
+    {head:'javítás'},
+    (CFG.asrKey)?{t:'újrafelismerés és javítás (friss hang + összevetés)',
+      fn:()=>{ closeSheet(); senFix(i) }}:null,
+    {t:'ez a buborék TÖRLÉSE',dang:true,fn:()=>{ closeSheet(); senTorol(i) }},
+    SENVISSZA&&SENVISSZA.id===REC.id?{t:'az utolsó igazítás visszavonása ('+
+      SENVISSZA.mit+')',fn:()=>{ closeSheet(); senVisszavon() }}:null
+  ]);
 }
 async function senFix(i){
   if(!REC||!REC.sen||!REC.sen[i]) return;
