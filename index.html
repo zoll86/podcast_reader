@@ -159,6 +159,11 @@ input[type=range]{width:100%;accent-color:var(--gold);min-height:32px}
 .pill.ok{border-color:rgba(87,217,163,.45);color:var(--green)}
 .pill.part{border-color:rgba(232,182,76,.45);color:var(--gold)}
 .pill.bad{border-color:rgba(232,90,90,.5);color:#e57373}
+.shInp{margin:var(--sp3) 0}
+.shInp input{width:100%;padding:12px 14px;border-radius:var(--r2);
+  background:rgba(255,255,255,.05);border:1px solid var(--line);color:var(--fg);
+  font-family:var(--mono);font-size:16px}
+.shInp input:focus{outline:none;border-color:rgba(232,182,76,.5)}
 span.pill.bad{color:#e57373}
 span.pill.ok{color:var(--green)}
 span.pill.part{color:var(--gold)}
@@ -1237,7 +1242,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v132';
+const APP_VER='v133';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -9518,6 +9523,25 @@ function sheet(title,items){
       b.appendChild(d); return }
     if(it.note){ const d=document.createElement('div'); d.className='note'; d.textContent=it.note;
       b.appendChild(d); return }
+    /* v133: beviteli mező a lapon — ha valamit pontosan akarsz megadni, ne
+       csak gombokból lehessen. A gombok fn-je a shVal(id)-vel olvassa ki. */
+    if(it.inp){
+      const wrap=document.createElement('div'); wrap.className='shInp';
+      if(it.inp.cim){ const l=document.createElement('label');
+        l.className='lbl'; l.textContent=it.inp.cim; wrap.appendChild(l) }
+      const el=document.createElement('input');
+      el.type=it.inp.type||'text';
+      el.id='shI_'+it.inp.id;
+      el.inputMode=it.inp.mode||'text';
+      if(it.inp.ph) el.placeholder=it.inp.ph;
+      if(it.inp.val!=null) el.value=it.inp.val;
+      el.autocomplete='off';
+      el.onkeydown=e=>{ if(e.key==='Enter'&&it.inp.enter){ e.preventDefault(); it.inp.enter() } };
+      wrap.appendChild(el);
+      b.appendChild(wrap);
+      setTimeout(()=>{ try{ el.focus(); el.select&&el.select() }catch(x){} },120);
+      return;
+    }
     const btn=document.createElement('button');
     btn.className='btn'+(it.pri?' pri':'')+(it.dang?' dang':'');
     btn.textContent=it.t;
@@ -9529,7 +9553,10 @@ function sheet(title,items){
       im.onerror=()=>im.remove();
       btn.prepend(im);
     }
-    btn.onclick=()=>{ closeSheet(); setTimeout(()=>it.fn&&it.fn(),60) };
+    btn.onclick=()=>{
+      if(it.nyitva){ it.fn&&it.fn(); return }     /* v133: a lap nyitva marad */
+      closeSheet(); setTimeout(()=>it.fn&&it.fn(),60);
+    };
     /* Egy sor MÁSODIK művelete (pl. „✕ kivétel"). Eddig egy sor egy gomb volt,
        tehát a lista részeire csak a lejátszás jutott — a kivételhez külön lapra
        kellett menni. A másodlagos gomb NEM zárja be a lapot, mert tipikusan több
@@ -9547,6 +9574,25 @@ function sheet(title,items){
   });
   $('sheet').classList.add('on');
   armBack();
+}
+/* a lapon lévő mező értéke */
+const shVal=id=>{ const el=$('shI_'+id); return el?String(el.value||'').trim():'' };
+/* „12:34.5”, „754”, „7:06:18” → másodperc; üres/érthetetlen → null */
+function ertIdo(t){
+  t=String(t||'').trim().replace(',','.');
+  if(!t) return null;
+  if(/^-?\d+(\.\d+)?$/.test(t)) return +t;
+  const r=t.split(':').map(x=>x.trim());
+  if(r.some(x=>!/^\d+(\.\d+)?$/.test(x))) return null;
+  let sec=0;
+  for(const x of r) sec=sec*60+ +x;
+  return sec;
+}
+/* „+1,8”, „-0.5”, „2” → másodperc (előjeles) */
+function ertTolas(t){
+  t=String(t||'').trim().replace(',','.');
+  if(!/^[+-]?\d+(\.\d+)?$/.test(t)) return null;
+  return +t;
 }
 const closeSheet=()=>{ const bx=$('sheetBox');
   bx.style.transition=''; bx.style.transform='';
@@ -9768,18 +9814,41 @@ function sheetSen(i){
   sheet(fmtT(s.a)+' · '+String(s.en||'').slice(0,44),[
     {note:'„'+String(s.en||'').slice(0,150)+'”'+(s.hu?'  →  „'+String(s.hu).slice(0,150)+'”':'')},
     {t:'a lejátszófej ide állítása',fn:()=>{ closeSheet(); gotoSen(i) }},
-    {head:'időzítés'},
+    {head:'időzítés — a lejátszófej szerint'},
     {t:'a kezdet ide: '+fmtT(most)+(Math.abs(kulonbseg)>0.2
         ?'  ('+(kulonbseg>0?'+':'')+kulonbseg.toFixed(1).replace('.',',')+' s)':''),
       pri:1,fn:()=>{ closeSheet(); senKezdet(i,most) }},
     {t:'fél másodperccel korábbra',fn:()=>{ closeSheet(); senKezdet(i,(s.a||0)-0.5) }},
     {t:'fél másodperccel későbbre',fn:()=>{ closeSheet(); senKezdet(i,(s.a||0)+0.5) }},
+    /* v133: pontos érték kézzel — időpont perc:másodperc vagy másodperc alakban */
+    {head:'időzítés — kézzel megadva'},
+    {inp:{id:'kezd',cim:'kezdet pontosan (12:34 vagy 754)',val:fmtT(s.a||0),
+      mode:'text',enter:()=>{ const v=ertIdo(shVal('kezd'));
+        if(v==null) return toast('ezt nem értem: írd 12:34 vagy 754 alakban',5000);
+        closeSheet(); senKezdet(i,v) }}},
+    {t:'▸ a beírt időpont beállítása',nyitva:true,fn:()=>{
+      const v=ertIdo(shVal('kezd'));
+      if(v==null) return toast('ezt nem értem: írd 12:34 vagy 754 alakban',5000);
+      closeSheet(); senKezdet(i,v);
+    }},
     (Math.abs(kulonbseg)>0.3)?{t:'INNENTŐL minden mondat eltolása '+
       (kulonbseg>0?'+':'')+kulonbseg.toFixed(1).replace('.',',')+' s-mal',pri:1,
       fn:()=>{ closeSheet(); senTolas(i,kulonbseg,false) }}:null,
     (Math.abs(kulonbseg)>0.3)?{t:'az EGÉSZ rész eltolása '+
       (kulonbseg>0?'+':'')+kulonbseg.toFixed(1).replace('.',',')+' s-mal',
       fn:()=>{ closeSheet(); senTolas(i,kulonbseg,true) }}:null,
+    {inp:{id:'tol',cim:'eltolás másodpercben (pl. -1,8 vagy +2)',val:'',
+      mode:'text',ph:'-1,8'}},
+    {t:'▸ a beírt értékkel: INNENTŐL minden mondat',nyitva:true,fn:()=>{
+      const d=ertTolas(shVal('tol'));
+      if(d==null||!d) return toast('írj be egy számot, pl. -1,8',5000);
+      closeSheet(); senTolas(i,d,false);
+    }},
+    {t:'▸ a beírt értékkel: az EGÉSZ rész',nyitva:true,fn:()=>{
+      const d=ertTolas(shVal('tol'));
+      if(d==null||!d) return toast('írj be egy számot, pl. -1,8',5000);
+      closeSheet(); senTolas(i,d,true);
+    }},
     {head:'javítás'},
     (CFG.asrKey)?{t:'újrafelismerés és javítás (friss hang + összevetés)',
       fn:()=>{ closeSheet(); senFix(i) }}:null,
