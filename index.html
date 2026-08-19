@@ -1242,7 +1242,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v133';
+const APP_VER='v135';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -9753,9 +9753,29 @@ async function senVisszavon(){
   if(!SENVISSZA||!REC||SENVISSZA.id!==REC.id) return toast('nincs mit visszavonni');
   REC.sen=SENVISSZA.sen; SENVISSZA=null;
   await save(REC);
-  CUR=-1; renderKara(true); try{ huBuild(); renderHu(true) }catch(e){}
+  /* v135: a szerkesztés után maradjunk ott, ahol vagyunk. A CUR=-1 magában azt
+     jelentette, hogy „nincs aktuális mondat”, és a folyam visszaugrott a rész
+     elejére — a lejátszófej közben nem is mozdult. A tick() az idő alapján
+     megkeresi a helyes mondatot, így a nézet a helyén marad. */
+  CUR=curIde();                     /* v135: ott maradunk, ahol a hang tart */
+  renderKara(true); try{ huBuild(); renderHu(true) }catch(e){}
   drawSeek(); toast('visszavonva',3500);
 }
+/* a lejátszófejhez legközelebbi (még elkezdődött) mondat — a senAt() csendben
+   negatív jelzést ad, itt viszont valódi sorszám kell */
+function curIde(){
+  const S=(REC&&REC.sen)||[];
+  if(!S.length) return -1;
+  const t=(A&&A.currentTime)||0;
+  let lo=0,hi=S.length-1,best=-1;
+  while(lo<=hi){ const m=(lo+hi)>>1;
+    if(S[m].a<=t+0.001){ best=m; lo=m+1 } else hi=m-1 }
+  return best>=0?best:0;
+}
+/* ══ v135: A SZERKESZTÉS UTÁN OTT MARADUNK, AHOL VAGYUNK ══
+   Eddig CUR=-1 („nincs aktuális mondat”) volt a szerkesztés vége, és a folyam
+   emiatt visszaugrott a rész elejére — pedig a lejátszófej nem is mozdult.
+   Most az AKTUÁLIS IDŐHÖZ tartozó mondatra állunk vissza. */
 async function senTorol(i){
   if(!REC||!REC.sen||!REC.sen[i]) return;
   const s=REC.sen[i];
@@ -9774,16 +9794,52 @@ async function senKezdet(i,uj){
   const S=REC.sen, s=S[i];
   const hossz=Math.max(0.4,(s.b||s.a+2)-(s.a||0));
   senMent(REC,'kezdet');
-  const elott=i>0?(S[i-1].b||S[i-1].a||0):0;
-  s.a=Math.max(elott+0.05,Math.max(0,uj));
+  /* ══ v134: A BEÍRT IDŐPONT SZENT ══
+     Eddig nem engedtük a mondatot az előzője elé — jó szándékkal, de ha a
+     felismerés két mondatot FELCSERÉLT, éppen ez akadályozta a javítást
+     („18:12-t adok meg, ő 18:40-re húzza”). Innentől oda kerül, ahová
+     mondod; a lista utána újrarendeződik, és a szomszédokat csak akkor
+     igazítjuk, ha tényleg egymásba érnek. */
+  s.a=Math.max(0,uj);
   s.b=s.a+hossz;
-  if(i+1<S.length&&S[i+1].a<s.b) s.b=Math.max(s.a+0.4,S[i+1].a-0.05);
-  if(s.w&&s.w.length){ delete s.w }        /* a szó-időbélyegek elavultak */
+  if(s.w&&s.w.length) delete s.w;          /* a szó-időbélyegek elavultak */
   S.sort((x,y)=>(x.a||0)-(y.a||0));
+  const uji=S.indexOf(s);
+  /* átfedés rendezése: a mondat vége ne lógjon a következő kezdetébe */
+  if(uji+1<S.length&&S[uji+1].a<s.b) s.b=Math.max(s.a+0.4,S[uji+1].a-0.05);
+  const elozo=uji>0?S[uji-1]:null;
+  if(elozo&&elozo.b>s.a) elozo.b=Math.max((elozo.a||0)+0.4,s.a-0.05);
   await save(REC);
-  CUR=-1; renderKara(true); try{ huBuild(); renderHu(true) }catch(e){}
+  /* v135: a szerkesztés után maradjunk ott, ahol vagyunk. A CUR=-1 magában azt
+     jelentette, hogy „nincs aktuális mondat”, és a folyam visszaugrott a rész
+     elejére — a lejátszófej közben nem is mozdult. A tick() az idő alapján
+     megkeresi a helyes mondatot, így a nézet a helyén marad. */
+  CUR=curIde();                     /* v135: ott maradunk, ahol a hang tart */
+  renderKara(true); try{ huBuild(); renderHu(true) }catch(e){}
   drawSeek();
-  toast('a mondat kezdete: '+fmtT(s.a),4000);
+  toast('a mondat kezdete: '+fmtT(s.a)+(uji!==i?' — a '+(uji+1)+'. helyre került':''),5000);
+}
+/* ══ v134: KÉT SZOMSZÉDOS BUBORÉK CSERÉJE ══
+   Ha a felismerés a szövegeket cserélte fel (az időzítés jó, a mondatok
+   viszont helyet cseréltek), a legegyszerűbb a szöveget odébb tenni. */
+async function senCsere(i,j){
+  if(!REC||!REC.sen) return;
+  const S=REC.sen;
+  if(i<0||j<0||i>=S.length||j>=S.length||i===j) return;
+  senMent(REC,'csere');
+  const a=S[i], b=S[j];
+  const t1={en:a.en,hu:a.hu}, t2={en:b.en,hu:b.hu};
+  a.en=t2.en; a.hu=t2.hu; b.en=t1.en; b.hu=t1.hu;
+  if(a.w) delete a.w; if(b.w) delete b.w;
+  await save(REC);
+  /* v135: a szerkesztés után maradjunk ott, ahol vagyunk. A CUR=-1 magában azt
+     jelentette, hogy „nincs aktuális mondat”, és a folyam visszaugrott a rész
+     elejére — a lejátszófej közben nem is mozdult. A tick() az idő alapján
+     megkeresi a helyes mondatot, így a nézet a helyén marad. */
+  CUR=curIde();                     /* v135: ott maradunk, ahol a hang tart */
+  renderKara(true); try{ huBuild(); renderHu(true) }catch(e){}
+  log('két buborék szövege felcserélve: '+fmtT(a.a)+' ↔ '+fmtT(b.a));
+  toast('felcserélve — visszavonható',4500);
 }
 /* eltolás: ettől a mondattól (vagy az egész résztől) minden időpont dt-vel */
 async function senTolas(i,dt,mind){
@@ -9791,7 +9847,7 @@ async function senTolas(i,dt,mind){
   const S=REC.sen;
   senMent(REC,'eltolás');
   const tol=(k)=>{
-    const s=S[k];
+    const s=S[k]; if(!s) return;
     s.a=Math.max(0,(s.a||0)+dt);
     s.b=Math.max(s.a+0.2,(s.b||s.a)+dt);
     if(s.w&&s.w.length) s.w=s.w.map(x=>Math.max(0,x+dt));
@@ -9799,7 +9855,12 @@ async function senTolas(i,dt,mind){
   if(mind) for(let k=0;k<S.length;k++) tol(k);
   else for(let k=i;k<S.length;k++) tol(k);
   await save(REC);
-  CUR=-1; renderKara(true); try{ huBuild(); renderHu(true) }catch(e){}
+  /* v135: a szerkesztés után maradjunk ott, ahol vagyunk. A CUR=-1 magában azt
+     jelentette, hogy „nincs aktuális mondat”, és a folyam visszaugrott a rész
+     elejére — a lejátszófej közben nem is mozdult. A tick() az idő alapján
+     megkeresi a helyes mondatot, így a nézet a helyén marad. */
+  CUR=curIde();                     /* v135: ott maradunk, ahol a hang tart */
+  renderKara(true); try{ huBuild(); renderHu(true) }catch(e){}
   drawSeek();
   const jel=(dt>0?'+':'')+dt.toFixed(1).replace('.',',')+' s';
   log('időzítés eltolva '+jel+(mind?' (az egész rész)':' (innentől: '+fmtT(S[i]&&S[i].a)+')'));
@@ -9849,6 +9910,11 @@ function sheetSen(i){
       if(d==null||!d) return toast('írj be egy számot, pl. -1,8',5000);
       closeSheet(); senTolas(i,d,true);
     }},
+    {head:'sorrend'},
+    (i>0)?{t:'csere az ELŐZŐ buborékkal (a szövegek helyet cserélnek)',
+      fn:()=>{ closeSheet(); senCsere(i,i-1) }}:null,
+    (i+1<S.length)?{t:'csere a KÖVETKEZŐ buborékkal',
+      fn:()=>{ closeSheet(); senCsere(i,i+1) }}:null,
     {head:'javítás'},
     (CFG.asrKey)?{t:'újrafelismerés és javítás (friss hang + összevetés)',
       fn:()=>{ closeSheet(); senFix(i) }}:null,
