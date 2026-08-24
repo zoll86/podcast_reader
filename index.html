@@ -1263,7 +1263,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v137';
+const APP_VER='v138';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -8139,11 +8139,49 @@ setInterval(()=>{ try{ ttsTick() }catch(e){} },250);
 if(ttsVan()){
   try{ speechSynthesis.onvoiceschanged=()=>{ TTS.hang=null; ttsHang() } }catch(e){}
 }
-function drawHuBtn(){ $('pHu').innerHTML='HU<b>'+(HUNAMES[CFG.huMode]||'alul')+'</b>' }
-$('pHu').onclick=()=>{
-  CFG.huMode=HUMODES[(HUMODES.indexOf(CFG.huMode)+1)%HUMODES.length];
-  /* v137: felolvasás csak ott, ahol van is beszédhang; ha nincs, átlépjük */
-  if(CFG.huMode==='tts'&&!ttsVan()){
+/* ══ v138: MAGYAR-LAP — a HU gombot hosszan nyomva nyílik ══
+   A négy mód körbenyomkodása helyett egy lap, ahol látszik mind, és rögtön itt
+   van a hangválasztó meg a tempó is. Ugyanez a lap elérhető a ⋯ menüből. */
+function sheetHu(){
+  const hangok=(()=>{ try{ return (typeof speechSynthesis!=='undefined'&&
+    speechSynthesis.getVoices())||[] }catch(e){ return [] } })();
+  const hu=hangok.filter(x=>/^hu/i.test(x.lang||''));
+  const most=ttsHang();
+  const mod=(k,cim,mit)=>({t:(CFG.huMode===k?'● ':'○ ')+cim,pri:CFG.huMode===k?1:0,
+    fn:()=>{ closeSheet(); huMod(k) },note0:mit});
+  sheet('magyar szöveg',[
+    {note:'Hogyan kéred a magyart hallgatás közben?'},
+    mod('split','alul — a képernyő alsó felén'),
+    mod('full','teljes képernyőn — angol sáv nélkül'),
+    mod('hide','rejtve — koppints a mondatra'),
+    mod('tts','FELOLVASVA — minden angol mondat után'),
+    {head:'felolvasás'},
+    {note:hangok.length
+      ? (hu.length?(hu.length+' magyar hang van a telefonon. Most: '+
+          ((most&&most.name)||'a rendszer alapértelmezettje')+'.')
+        :'Magyar hangot nem találok a telefonon — a rendszer alapértelmezettjével olvas. '+
+         'Androidon: Beállítások → Nyelvek és bevitel → Szövegfelolvasás → Google '+
+         'beszédszintézis → magyar hang letöltése.')
+      :'A telefon most nem ad beszédhangot. Ha most kapcsoltad be a készüléket, '+
+       'nyisd meg újra ezt a lapot pár másodperc múlva.'},
+    ...hu.slice(0,6).map(v=>({t:((CFG.ttsVoice||(most&&most.name))===v.name?'● ':'○ ')+
+      'hang: '+v.name.slice(0,30),fn:()=>{ CFG.ttsVoice=v.name; TTS.hang=null; saveCfg();
+        ttsMond('Így fogom felolvasni a magyar mondatokat.'); closeSheet() }})),
+    {t:'próba: olvass fel egy mondatot',fn:()=>{ closeSheet();
+      ttsMond('Így fogom felolvasni a magyar mondatokat. A tempó '+
+        String(CFG.ttsRate||1.05).replace('.',',')+'.') }},
+    {t:'lassabban  ('+String(Math.max(0.7,(CFG.ttsRate||1.05)-0.1)).slice(0,4)+'×)',
+      nyitva:true,fn:()=>{ CFG.ttsRate=Math.max(0.7,(CFG.ttsRate||1.05)-0.1); saveCfg();
+        ttsMond('Ilyen tempóban olvasok.') }},
+    {t:'gyorsabban ('+String(Math.min(1.6,(CFG.ttsRate||1.05)+0.1)).slice(0,4)+'×)',
+      nyitva:true,fn:()=>{ CFG.ttsRate=Math.min(1.6,(CFG.ttsRate||1.05)+0.1); saveCfg();
+        ttsMond('Ilyen tempóban olvasok.') }}
+  ]);
+}
+/* egy mód beállítása (a gomb és a lap is ezt hívja) */
+function huMod(k){
+  CFG.huMode=k;
+  if(k==='tts'&&!ttsVan()){
     CFG.huMode='split';
     toast('ezen a készüléken nincs beszédhang — a felolvasás kimarad',6000);
   }
@@ -8151,10 +8189,24 @@ $('pHu').onclick=()=>{
   if(CFG.huMode==='tts'){
     TTS.mondat=-1;
     const h=ttsHang();
-    toast(h?('felolvasás: '+(h.name||'magyar hang')+' — minden angol mondat után'):
-      'felolvasás bekapcsolva — magyar hangot nem találtam, a rendszer alapértelmezettjét használom',7000);
+    toast(h?('felolvasás: '+(h.name||'magyar hang')+' — minden angol mondat után')
+      :'felolvasás bekapcsolva — magyar hangot nem találtam, a rendszer alapértelmezettjével olvasok',7000);
     log('felolvasás BE'+(h?' · hang: '+h.name+' ('+h.lang+')':' · nincs magyar hang'));
   }else{ ttsStop(); toast(HUFULL[CFG.huMode]) }
+}
+function drawHuBtn(){ $('pHu').innerHTML='HU<b>'+(HUNAMES[CFG.huMode]||'alul')+'</b>' }
+/* koppintás: a következő mód · hosszú nyomás: a teljes lap (v138) */
+let huLong=null, huLongOn=false;
+$('pHu').addEventListener('pointerdown',()=>{
+  huLongOn=false;
+  huLong=setTimeout(()=>{ huLongOn=true; try{ navigator.vibrate&&navigator.vibrate(12) }catch(e){}
+    sheetHu() },500);
+});
+['pointerup','pointerleave','pointercancel'].forEach(ev=>
+  $('pHu').addEventListener(ev,()=>{ clearTimeout(huLong) }));
+$('pHu').onclick=()=>{
+  if(huLongOn){ huLongOn=false; return }
+  huMod(HUMODES[(HUMODES.indexOf(CFG.huMode)+1)%HUMODES.length]);
 };
 $('kara').addEventListener('click',e=>{
   /* v103: a javító pöcök előbb jön, mint a mondatra ugrás */
@@ -9783,6 +9835,8 @@ $('pMore').onclick=()=>{
       :'szöveg készítése (felismerés)',pri:1,fn:sheetProcess},
     /* v120: az „elejétől a végéig" fordító a napi menüben is — ez a leggyakoribb
        teendő a gépen készült (vagy mappából behúzott) SRT után */
+    {t:'magyar szöveg és FELOLVASÁS — '+(HUNAMES[CFG.huMode]||'alul'),pri:CFG.huMode==='tts'?1:0,
+      fn:()=>{ closeSheet(); setTimeout(sheetHu,80) }},
     (REC&&REC.sen&&REC.sen[CUR])?{t:'ennek a mondatnak az igazítása (időzítés, törlés)',
       fn:()=>{ closeSheet(); sheetSen(CUR) }}:null,
     (SENVISSZA&&REC&&SENVISSZA.id===REC.id)?{t:'az utolsó igazítás visszavonása ('+
@@ -11236,6 +11290,13 @@ async function onvizsgalat(){
   log('2. kulcsok: felismerő '+(CFG.asrKey?'megvan':'HIÁNYZIK')+
       ' · fordító: '+(CFG.tr||'free')+(engReady(CFG.tr)===false?' (kulcs HIÁNYZIK)':' rendben')+
       ' · hálózat: '+(('onLine' in navigator&&!navigator.onLine)?'NINCS':'van'));
+  (function(){
+    let v=[]; try{ v=(typeof speechSynthesis!=='undefined'&&speechSynthesis.getVoices())||[] }catch(e){}
+    const hu=v.filter(x=>/^hu/i.test(x.lang||''));
+    log('2/b. felolvasás: '+(typeof speechSynthesis==='undefined'?'a készülék nem ad beszédhangot'
+      :(v.length+' hang, ebből '+hu.length+' magyar'+
+        (hu.length?' — pl. '+hu[0].name:'')))+' · mód: '+(HUNAMES[CFG.huMode]||'?'));
+  })();
   log('3. motor: '+motorAllapot()+' · kapu: '+(GATE.on?'FUT (vár)':'áll')+
       ' · beállítás: kapu '+(CFG.gate?'be':'ki')+', kísérő '+(CFG.follow?'be':'ki'));
 
