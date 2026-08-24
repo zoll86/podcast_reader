@@ -1261,7 +1261,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v141';
+const APP_VER='v142';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -1633,7 +1633,36 @@ function b64bytes(x){
    fallback be sem lépett. */
 let SAFLANC=Promise.resolve();
 const SAF_VAR=12000;
-function safReadOne(uri,off,len){
+/* ══════════════════════════════════════════════════════════════════════════
+   v142: A NATÍV OLVASÁS DARABOLVA
+   A telefonon kapott összeomlás pontosan megmondta az okot:
+     java.lang.OutOfMemoryError: Failed to allocate a 75497488 byte allocation
+       at JSONObject.toString → Bridge.callPluginMethod
+   A plugin base64-ben adja vissza a bájtokat, és a Capacitor JSON-szöveggé
+   alakítja a választ. Egy néhány megabájtos kérés így tízmegás sztringgé, majd
+   a StringBuilder duplázásával hetvenöt megás foglalássá nő — és a WebView
+   elszáll. Ezért a natív hívás MINDIG kis darabokban megy; a hívók nem
+   vesznek észre semmit, csak összefűzzük az eredményt.
+   ══════════════════════════════════════════════════════════════════════════ */
+const SAF_DARAB=192*1024;
+async function safReadOne(uri,off,len){
+  if(len>SAF_DARAB){
+    const ki=new Uint8Array(len);
+    let irt=0;
+    while(irt<len){
+      const most=Math.min(SAF_DARAB,len-irt);
+      const d=await safReadDarab(uri,off+irt,most);
+      if(!d||!d.length) break;
+      ki.set(d,irt);
+      irt+=d.length;
+      if(d.length<most) break;               /* a fájl vége */
+    }
+    if(!irt) throw new Error('a plugin read() üresen tért vissza');
+    return irt===len?ki:ki.subarray(0,irt);
+  }
+  return await safReadDarab(uri,off,len);
+}
+function safReadDarab(uri,off,len){
   const p=SAFLANC.then(()=>Promise.race([
     safReadRaw(uri,off,len),
     new Promise((_,rej)=>setTimeout(()=>rej(new Error(
@@ -2226,7 +2255,10 @@ async function id3Cover(file){
     if(h.length<10||!(h[0]===0x49&&h[1]===0x44&&h[2]===0x33)) return null;
     const ver=h[3], flags=h[5];
     const size=((h[6]&127)<<21|(h[7]&127)<<14|(h[8]&127)<<7|(h[9]&127));
-    let buf=await readSlice(file,10,10+Math.min(size,8*1024*1024));
+    /* v142: a borítóhoz elég a tag eleje — egy 8 MB-os kérés a natív oldalon
+       hetvenöt megás foglalássá nőtt (lásd a safReadOne magyarázatát). Egy
+       ID3-tag borítóstul is jóval 2 MB alatt van. */
+    let buf=await readSlice(file,10,10+Math.min(size,2*1024*1024));
     /* teljes-tag unsync visszaalakítása (v2.3-nál a tagre vonatkozik) */
     if(flags&0x80){
       const t=new Uint8Array(buf.length); let w=0;
