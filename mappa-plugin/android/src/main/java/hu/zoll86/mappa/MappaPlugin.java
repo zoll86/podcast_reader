@@ -5,6 +5,9 @@ import android.database.Cursor;
 import android.net.Uri;
 import android.provider.DocumentsContract;
 import android.util.Base64;
+import android.speech.tts.TextToSpeech;
+import android.speech.tts.UtteranceProgressListener;
+import android.os.Bundle;
 
 import androidx.activity.result.ActivityResult;
 
@@ -22,6 +25,9 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.util.Locale;
+import java.util.Set;
+import java.util.HashMap;
 
 /**
  * PODCAST-MAPPA (SAF) — a Kétnyelvű hallgató natív mappa-hozzáférése.
@@ -665,6 +671,121 @@ public class MappaPlugin extends Plugin {
         } catch (Exception e) {
             call.reject(e.getMessage());
         }
+    }
+
+    /* ══════════════════════════════════════════════════════════════════════
+       FELOLVASÓ (v139)
+       Az Android WebView-ban NINCS Web Speech API — a `speechSynthesis` a
+       böngészőben működik, az alkalmazásba ágyazott WebView-ban nem. Ezért a
+       felolvasás natívan megy: a rendszer TextToSpeech szolgáltatásával,
+       ugyanazzal, amit a telefon máshol is használ. A JS csak szöveget küld,
+       és megkapja, mikor lett kész.
+       ══════════════════════════════════════════════════════════════════════ */
+    private TextToSpeech tts = null;
+    private boolean ttsKesz = false;
+    private PluginCall ttsVar = null;
+
+    private void ttsIndit(final Runnable utana) {
+        if (tts != null && ttsKesz) { if (utana != null) utana.run(); return; }
+        if (tts == null) {
+            tts = new TextToSpeech(getContext(), new TextToSpeech.OnInitListener() {
+                @Override public void onInit(int status) {
+                    ttsKesz = (status == TextToSpeech.SUCCESS);
+                    if (ttsKesz) {
+                        try { tts.setLanguage(new Locale("hu", "HU")); } catch (Exception ignore) {}
+                        tts.setOnUtteranceProgressListener(new UtteranceProgressListener() {
+                            @Override public void onStart(String id) {}
+                            @Override public void onDone(String id) { ttsVege(true, ""); }
+                            @Override public void onError(String id) { ttsVege(false, "a felolvasás megszakadt"); }
+                        });
+                    }
+                    if (utana != null) utana.run();
+                }
+            });
+        } else if (utana != null) utana.run();
+    }
+
+    private synchronized void ttsVege(boolean ok, String hiba) {
+        PluginCall c = ttsVar; ttsVar = null;
+        if (c == null) return;
+        JSObject r = new JSObject();
+        r.put("ok", ok);
+        if (!ok) r.put("hiba", hiba);
+        c.resolve(r);
+    }
+
+    /** felolvasás; a hívás akkor tér vissza, amikor a mondat elhangzott */
+    @PluginMethod
+    public void ttsSpeak(final PluginCall call) {
+        final String szoveg = call.getString("text", "");
+        if (szoveg == null || szoveg.trim().isEmpty()) {
+            JSObject r = new JSObject(); r.put("ok", true); call.resolve(r); return;
+        }
+        call.setKeepAlive(true);
+        ttsIndit(new Runnable() { @Override public void run() {
+            if (!ttsKesz || tts == null) {
+                JSObject r = new JSObject(); r.put("ok", false);
+                r.put("hiba", "a készüléken nincs beszédszintézis");
+                call.resolve(r); return;
+            }
+            try {
+                float rate = (float) call.getDouble("rate", 1.05);
+                float pitch = (float) call.getDouble("pitch", 1.0);
+                tts.setSpeechRate(rate);
+                tts.setPitch(pitch);
+                String hang = call.getString("voice", "");
+                if (hang != null && !hang.isEmpty()) {
+                    for (android.speech.tts.Voice v : tts.getVoices()) {
+                        if (hang.equals(v.getName())) { tts.setVoice(v); break; }
+                    }
+                } else {
+                    try { tts.setLanguage(new Locale("hu", "HU")); } catch (Exception ignore) {}
+                }
+                synchronized (MappaPlugin.this) {
+                    if (ttsVar != null) { ttsVege(true, ""); }
+                    ttsVar = call;
+                }
+                tts.stop();
+                Bundle b = new Bundle();
+                b.putString(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, "m");
+                int e = tts.speak(szoveg, TextToSpeech.QUEUE_FLUSH, b, "m");
+                if (e != TextToSpeech.SUCCESS) ttsVege(false, "a felolvasás nem indult");
+            } catch (Exception ex) {
+                ttsVege(false, ex.getMessage());
+            }
+        }});
+    }
+
+    @PluginMethod
+    public void ttsStop(PluginCall call) {
+        try { if (tts != null) tts.stop(); } catch (Exception ignore) {}
+        ttsVege(true, "");
+        call.resolve();
+    }
+
+    /** a készüléken elérhető hangok (a magyarok elöl) */
+    @PluginMethod
+    public void ttsVoices(final PluginCall call) {
+        ttsIndit(new Runnable() { @Override public void run() {
+            JSArray ki = new JSArray();
+            try {
+                if (tts != null && ttsKesz) {
+                    Set<android.speech.tts.Voice> v = tts.getVoices();
+                    if (v != null) for (android.speech.tts.Voice x : v) {
+                        String lang = (x.getLocale() != null) ? x.getLocale().toString() : "";
+                        JSObject o = new JSObject();
+                        o.put("name", x.getName());
+                        o.put("lang", lang);
+                        o.put("hu", lang.toLowerCase().startsWith("hu"));
+                        ki.put(o);
+                    }
+                }
+            } catch (Exception ignore) {}
+            JSObject r = new JSObject();
+            r.put("voices", ki);
+            r.put("van", ttsKesz);
+            call.resolve(r);
+        }});
     }
 
     private String szepNev(Uri tree) {
