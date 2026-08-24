@@ -140,6 +140,7 @@ input[type=range]{width:100%;accent-color:var(--gold);min-height:32px}
 #drop.hot{border-color:var(--gold);background:rgba(232,182,76,.06)}
 #drop b{display:block;color:var(--txt);font-size:var(--t4);font-weight:500;margin-bottom:var(--sp2)}
 .lib{display:flex;flex-direction:column;gap:var(--sp3)}
+.lib > *{min-width:0}
 #intake{margin-top:var(--sp5)}
 #lib:empty+#intake{margin-top:0}
 .item{display:flex;gap:var(--sp3);align-items:stretch;background:var(--s1);
@@ -497,8 +498,16 @@ body.huFull .hs.cur{font-size:calc(var(--kfs) * 1.5)}
 .lgcap i{display:block;font-style:normal;font-family:var(--mono);font-size:10px;
   color:var(--faint);margin-top:3px;line-height:1.5}
 .lgcap b{font-weight:500;color:var(--gold)}
-.lgrack{display:grid;grid-template-columns:1fr 1fr 1fr;gap:var(--sp3)}
-@media (max-width:420px){ .lgrack{grid-template-columns:1fr 1fr} }
+/* ══ v140: A HOSSZÚ FÁJLNÉV NE FESZÍTSE SZÉT A RÁCSOT ══
+   Az `1fr` oszlop legkisebb mérete alapból a TARTALOM szélessége. Egy hosszú,
+   szóköz nélküli név (podcast_1_the_shot_that_led_to_war) nem tud tördelni,
+   ezért kitolta az oszlopot, és a csempék kilógtak a listából — miközben a
+   rövid, szóközös nevű sorozatok (Magnus) jók maradtak. A minmax(0,1fr) és a
+   tördelés ezt zárja ki. */
+.lgrack{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:var(--sp3)}
+@media (max-width:420px){ .lgrack{grid-template-columns:repeat(2,minmax(0,1fr))} }
+.lgrack > .bk{min-width:0}
+.bk b{overflow-wrap:anywhere;word-break:break-word;hyphens:auto}
 
 /* műsor-csempék */
 #showList{display:grid;grid-template-columns:1fr 1fr;gap:var(--sp2)}
@@ -652,6 +661,9 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
 #lib.shelf,#libRest.shelf{display:grid;
   grid-template-columns:repeat(auto-fill,minmax(104px,1fr));
   gap:var(--sp4) var(--sp3)}
+/* v140: ugyanaz a védelem a polcra is — a rácselemek soha ne feszüljenek
+   szét a tartalomtól (hosszú, tördelhetetlen fájlnevek) */
+#lib.shelf > *,#libRest.shelf > *{min-width:0}
 #lib.shelf .item,#libRest.shelf .item{display:none}
 .bk{position:relative;cursor:pointer;-webkit-tap-highlight-color:transparent}
 .bk .art{position:relative;aspect-ratio:1/1;border-radius:var(--r3);overflow:hidden;
@@ -1134,6 +1146,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
       <div class="row" style="margin-top:var(--sp3)">
         <button class="mini" id="logCopy">másolás</button>
         <button class="mini" id="logDiag">önvizsgálat</button>
+        <button class="mini" id="logPrev">előző futás</button>
         <button class="mini" id="logClr">törlés</button>
       </div>
     </div>
@@ -1254,7 +1267,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v136';
+const APP_VER='v140';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -1279,12 +1292,24 @@ function fmtT(s){ s=Math.max(0,Math.floor(s||0));
 const fmtMB=n=>(n/1048576).toFixed(n<10485760?1:0)+' MB';
 const HUF=350;
 
+/* ══════════════════════════════════════════════════════════════════════════
+   v140: A NAPLÓ ÉLJE TÚL A KILÉPÉST
+   Ha a program hibával kilép, a memóriában tartott napló elveszik — pont az,
+   amiből kiderülne, mi történt. Ezért az utolsó sorokat kiírjuk a tárolóba,
+   és a következő indításkor előhozhatók: ⚙ → Hibanapló → „előző futás”.
+   ══════════════════════════════════════════════════════════════════════════ */
+let ELOZO_LOG=[];
 /* ---- hibanapló ----
    Telefonon nincs fejlesztői konzol. Ezért minden hibát és a megnyitás lépéseit
    egy körkörös naplóba írjuk, ami a ⚙ lapon olvasható és másolható. E nélkül a
    „nem nyitja meg" típusú hibák okát otthonról nem lehet kideríteni — a program
    eddig lenyelte az okokat, és csak annyi látszott, hogy áll. */
-let LOG=J('hg_log',[]);
+/* v140: az ELŐZŐ futás naplója félretéve, MIELŐTT az új felülírná. Ha a program
+   hibával kilép, a következő indításnál előhozható: ⚙ → Hibanapló → „előző futás”. */
+ELOZO_LOG=J('hg_log',[]);
+try{ if(ELOZO_LOG.length) store.set('hg_log_elozo',JSON.stringify(ELOZO_LOG.slice(-160))) }catch(e){}
+try{ if(!ELOZO_LOG.length) ELOZO_LOG=J('hg_log_elozo',[]) }catch(e){}
+let LOG=[];
 function log(){
   const a=[...arguments];
   const line=new Date().toTimeString().slice(0,8)+' '+a.map(x=>{
@@ -11209,6 +11234,20 @@ async function onvizsgalat(){
   try{ $('logOut').scrollTop=$('logOut').scrollHeight }catch(x){}
 }
 $('logDiag').onclick=()=>{ onvizsgalat().catch(e=>log('önvizsgálat hiba:',e)) };
+/* v140: az előző (esetleg összeomlással véget ért) futás naplója */
+$('logPrev').onclick=()=>{
+  const sorok=ELOZO_LOG&&ELOZO_LOG.length?ELOZO_LOG:J('hg_log_elozo',[]);
+  if(!sorok.length) return toast('nincs eltett napló az előző futásból',5000);
+  sheet('az előző futás naplója',[
+    {note:'Ez a napló az app előző indításából maradt — ha kilépett vagy '+
+      'összeomlott, itt látszanak az utolsó sorai. Az utolsó '+sorok.length+' sor:'},
+    ...sorok.slice(-40).reverse().map(x=>({t:String(x).slice(0,120),fn:()=>{}})),
+    {t:'másolás vágólapra',pri:1,fn:async()=>{ closeSheet();
+      try{ await navigator.clipboard.writeText(sorok.join('\n'));
+        toast('kimásolva — beilleszthető') }
+      catch(e){ toast('a másolás nem sikerült: '+String(e&&(e.message||e)).slice(0,60),6000) } }}
+  ]);
+};
 $('logCopy').onclick=async()=>{
   const t='Kétnyelvű hallgató '+APP_VER+' · '+(navigator.userAgent||'')+'\n'+LOG.join('\n');
   try{ await navigator.clipboard.writeText(t); toast('a napló a vágólapon van — illeszd be a beszélgetésbe') }
