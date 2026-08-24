@@ -945,6 +945,15 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
       <div class="note">Egy kérésbe ennyi hang megy. <b id="vChunk"></b> — a 25 MB-os
         korlát miatt 10 percnél hosszabb szelet ritkán fér bele.</div>
       <!-- v120: a motor beállításai -->
+      <!-- v137: felolvasás -->
+      <label class="lbl">felolvasás (HU felolvas mód)</label>
+      <div class="seg" id="segTts"></div>
+      <div class="note">A lejátszó <b>HU</b> gombjával kapcsolható be. Ilyenkor a
+        program minden angol mondat után megállítja a hangot, felolvassa hozzá a
+        magyart, és folytatja. A telefon saját beszédhangját használja — nem kell
+        hozzá hálózat. <b id="vTts"></b></div>
+      <label class="lbl">a felolvasás tempója</label>
+      <input type="range" id="ttsRate" min="0.7" max="1.6" step="0.05">
       <label class="lbl">indítási kapu</label>
       <div class="seg" id="segGate">
         <button data-k="1">bekapcsolva</button>
@@ -1254,7 +1263,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v136';
+const APP_VER='v137';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -4712,7 +4721,7 @@ async function backupLoad(txt){
     if(fej&&fej.cfg){
       const be=fej.cfg;
       ['asrKey','dlKey','clKey','oaiKey','ttsKey','asr','asrUrl','asrModel','tr','clModel','words','pairs',
-       'kfs','font','huMode','rate','trMode','immSec','learn'].forEach(k=>{
+       'kfs','font','huMode','rate','trMode','immSec','learn','ttsVoice','ttsRate'].forEach(k=>{
         if(be[k]!=null&&(CFG[k]==null||CFG[k]===''||k.endsWith('Key'))) CFG[k]=be[k];
       });
       for(const l of (be.lists||[])){
@@ -7088,7 +7097,10 @@ A.addEventListener('play',()=>{ $('pPlay').textContent='❚❚'; wake(true); med
      magától gondoskodik róla, hogy egyszerre csak egy kérés menjen */
   try{ motorKisero() }catch(e){ log('kísérő hiba:',e) }
 });
-A.addEventListener('pause',()=>{ $('pPlay').textContent='▶'; wake(false); heardClose();
+A.addEventListener('pause',()=>{ $('pPlay').textContent='▶';
+  /* v137: kézi szüneteltetéskor a felolvasás is elhallgat — de a mondat végi,
+     általunk kért szünet közben nem (akkor épp olvasunk) */
+  if(!TTS.olvas&&!TTS.sajat) ttsStop(); wake(false); heardClose();
   if(REC){ REC.pos=A.currentTime; txtPut(strip(REC)).catch(()=>{}) } });
 A.addEventListener('ended',()=>{ $('pPlay').textContent='▶';
   bankCredit(CUR); heardClose(); bankSave(true);
@@ -8045,17 +8057,104 @@ $('pLoop').onclick=()=>{
    a teljes elrejtés. A gomb KIÍRJA, hol áll — nem csak a toast mondja meg. */
 /* v105: a „fent" (pin) helyére a TELJES KÉPERNYŐS magyar nézet került. A gomb
    helye és a koppintásos körforgás változatlan — csak a középső állás más. */
-const HUMODES=['split','full','hide'];
-const HUNAMES={split:'alul',full:'teljes',hide:'ki',pin:'fent'};
+const HUMODES=['split','full','hide','tts'];
+const HUNAMES={split:'alul',full:'teljes',hide:'ki',pin:'fent',tts:'felolvas'};
 const HUFULL={split:'magyar: a képernyő alsó felén',
               full:'magyar: a teljes képernyőn — angol sáv nélkül',
               hide:'magyar: rejtve — koppints a mondatra',
-              pin:'magyar: a gombok felett rögzítve'};
+              pin:'magyar: a gombok felett rögzítve',
+              tts:'magyar: FELOLVASVA — minden angol mondat után'};
+/* ══════════════════════════════════════════════════════════════════════════
+   v137: FELOLVASÁS (HU felolvas)
+   Edzés, vezetés, mosogatás közben a képernyő nem használható. Ebben a módban
+   a program megvárja, míg az angol mondat véget ér, MEGÁLLÍTJA a hangot,
+   felolvassa hozzá a magyart, és ott folytatja, ahol abbahagyta. A telefon
+   saját (Google) beszédhangját használjuk — nem kell hozzá se hálózat, se kulcs.
+   ══════════════════════════════════════════════════════════════════════════ */
+const TTS={be:false, mondat:-1, olvas:false, sajat:false, hang:null, hiba:''};
+function ttsVan(){ return typeof speechSynthesis!=='undefined'&&
+  typeof SpeechSynthesisUtterance!=='undefined' }
+function ttsHang(){
+  if(!ttsVan()) return null;
+  if(TTS.hang) return TTS.hang;
+  let v=[];
+  try{ v=speechSynthesis.getVoices()||[] }catch(e){ return null }
+  if(!v.length) return null;
+  const kiv=CFG.ttsVoice?v.find(x=>x.name===CFG.ttsVoice):null;
+  TTS.hang=kiv
+    || v.find(x=>/^hu(-|_)/i.test(x.lang||''))     /* magyar hang */
+    || v.find(x=>/^hu/i.test(x.lang||''))
+    || null;
+  return TTS.hang;
+}
+/* a mondat felolvasása; a végén (vagy hibánál) folytatjuk a lejátszást */
+function ttsMond(szoveg,kesz){
+  if(!ttsVan()||!szoveg){ kesz&&kesz(); return }
+  try{ speechSynthesis.cancel() }catch(e){}
+  const u=new SpeechSynthesisUtterance(String(szoveg).slice(0,600));
+  const h=ttsHang();
+  if(h){ u.voice=h; u.lang=h.lang||'hu-HU' } else u.lang='hu-HU';
+  u.rate=+(CFG.ttsRate||1.05);
+  u.pitch=+(CFG.ttsPitch||1);
+  u.volume=1;
+  let zart=false;
+  const zar=()=>{ if(zart) return; zart=true; TTS.olvas=false; kesz&&kesz() };
+  u.onend=zar;
+  u.onerror=e=>{ TTS.hiba=String((e&&e.error)||'ismeretlen'); zar() };
+  /* biztosíték: ha a rendszer elnyeli az esemény végét, ne álljunk le örökre */
+  const becsult=Math.min(30000,2000+String(szoveg).length*70);
+  setTimeout(zar,becsult);
+  TTS.olvas=true;
+  try{ speechSynthesis.speak(u) }catch(e){ TTS.hiba=String(e&&e.message||e); zar() }
+}
+function ttsStop(){
+  TTS.olvas=false; TTS.mondat=-1;
+  try{ if(ttsVan()) speechSynthesis.cancel() }catch(e){}
+}
+/* a lejátszás közben figyeljük, mikor ér véget egy mondat */
+function ttsTick(){
+  if(CFG.huMode!=='tts'||!REC||A.paused||TTS.olvas) return;
+  const S=REC.sen||[]; if(!S.length) return;
+  const t=A.currentTime||0;
+  const i=curIde();
+  if(i<0||i>=S.length) return;
+  const s=S[i];
+  if(i===TTS.mondat) return;                 /* ezt már felolvastuk */
+  if(t<(s.b||s.a)-0.05) return;              /* még tart az angol mondat */
+  if(!s.hu){ TTS.mondat=i; return }          /* nincs mit felolvasni */
+  /* a jelzőt a szüneteltetés ELŐTT tesszük fel: a pause eseménykezelő
+     különben „kézi szünetnek” venné, elhallgattatná a felolvasót, és a mondat
+     újra meg újra sorra került volna */
+  TTS.mondat=i; TTS.olvas=true; TTS.sajat=true;
+  A.pause();
+  TTS.sajat=false;
+  ttsMond(s.hu,()=>{
+    if(CFG.huMode!=='tts') return;
+    if(!REC||!REC.sen||REC.sen[i]!==s) return;
+    _playRaw().catch(()=>{});
+  });
+}
+setInterval(()=>{ try{ ttsTick() }catch(e){} },250);
+/* hangok betöltése (a rendszer késve adja őket) */
+if(ttsVan()){
+  try{ speechSynthesis.onvoiceschanged=()=>{ TTS.hang=null; ttsHang() } }catch(e){}
+}
 function drawHuBtn(){ $('pHu').innerHTML='HU<b>'+(HUNAMES[CFG.huMode]||'alul')+'</b>' }
 $('pHu').onclick=()=>{
   CFG.huMode=HUMODES[(HUMODES.indexOf(CFG.huMode)+1)%HUMODES.length];
+  /* v137: felolvasás csak ott, ahol van is beszédhang; ha nincs, átlépjük */
+  if(CFG.huMode==='tts'&&!ttsVan()){
+    CFG.huMode='split';
+    toast('ezen a készüléken nincs beszédhang — a felolvasás kimarad',6000);
+  }
   saveCfg(); applyLook(); drawHuBtn(); layoutSplit(); updHuBar(); paintCur(true);
-  toast(HUFULL[CFG.huMode]);
+  if(CFG.huMode==='tts'){
+    TTS.mondat=-1;
+    const h=ttsHang();
+    toast(h?('felolvasás: '+(h.name||'magyar hang')+' — minden angol mondat után'):
+      'felolvasás bekapcsolva — magyar hangot nem találtam, a rendszer alapértelmezettjét használom',7000);
+    log('felolvasás BE'+(h?' · hang: '+h.name+' ('+h.lang+')':' · nincs magyar hang'));
+  }else{ ttsStop(); toast(HUFULL[CFG.huMode]) }
 };
 $('kara').addEventListener('click',e=>{
   /* v103: a javító pöcök előbb jön, mint a mondatra ugrás */
@@ -10886,6 +10985,25 @@ function drawSet(){
   $('asrNote').textContent=asrCur().note;
   $('chunkMin').value=CFG.chunkMin;
   $('vChunk').textContent=CFG.chunkMin+' perc';
+  /* v137: beszédhangok — a telefonon lévők közül a magyarok */
+  (function(){
+    const seg=$('segTts'); if(!seg) return;
+    let v=[]; try{ v=(typeof speechSynthesis!=='undefined'&&speechSynthesis.getVoices())||[] }catch(e){}
+    const hu=v.filter(x=>/^hu/i.test(x.lang||''));
+    const lista=hu.length?hu:v.slice(0,6);
+    if(!lista.length){
+      seg.innerHTML='';
+      $('vTts').textContent='Ezen a készüléken most nem találok beszédhangot.';
+    }else{
+      segFill(seg,lista.map(x=>[x.name,(x.name||'').replace(/^.*?(?=[A-Za-z])/,'').slice(0,18)]),
+        CFG.ttsVoice||lista[0].name,k=>{ CFG.ttsVoice=k; TTS.hang=null; saveCfg();
+          ttsMond('Így fogom felolvasni a magyar mondatokat.');
+        });
+      $('vTts').textContent=hu.length?(hu.length+' magyar hang található.')
+        :'Magyar hangot nem találtam — a listából választhatsz.';
+    }
+    $('ttsRate').value=CFG.ttsRate||1.05;
+  })();
   /* v120: motor-beállítások */
   segFill($('segGate'),[[1,'bekapcsolva'],[0,'kikapcsolva']],CFG.gate?1:0,k=>{
     CFG.gate=+k; saveCfg(); if(!CFG.gate) GATE.on=false; drawSet() });
@@ -10987,6 +11105,8 @@ const bindTxt=(id,key)=>{ $(id).addEventListener('change',()=>{ CFG[key]=$(id).v
 bindTxt('asrKey','asrKey'); bindTxt('asrUrl','asrUrl'); bindTxt('asrModel','asrModel');
 bindTxt('dlKey','dlKey'); bindTxt('clKey','clKey'); bindTxt('oaiUrl','oaiUrl'); bindTxt('oaiKey','oaiKey'); bindTxt('oaiModel','oaiModel');
 $('chunkMin').oninput=()=>{ CFG.chunkMin=+$('chunkMin').value; $('vChunk').textContent=CFG.chunkMin+' perc'; saveCfg() };
+$('ttsRate').oninput=()=>{ CFG.ttsRate=+$('ttsRate').value; saveCfg() };
+$('ttsRate').onchange=()=>{ ttsMond('Ilyen tempóban olvasom fel a mondatokat.') };
 $('gateSec').oninput=()=>{ CFG.gateSec=+$('gateSec').value;
   $('vGate').textContent=CFG.gateSec+' másodpercnyi'; saveCfg() };
 $('aheadMin').oninput=()=>{ CFG.aheadMin=+$('aheadMin').value;
