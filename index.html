@@ -588,20 +588,26 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
 /* ══════════ v136: KÉT RÉSZRE OSZTOTT KÖNYVTÁR ══════════
    Felül fixen az, amit épp hallgatsz; alatta a polc görög tovább. Így a
    lejátszás akkor is egy koppintásra van, ha a lista aljára görgettél. */
-#resume{position:sticky;top:0;z-index:7;display:block;width:100%;aspect-ratio:1/1;
+#resume{position:sticky;top:var(--sp5);z-index:7;display:block;width:100%;aspect-ratio:1/1;
   border-radius:var(--r3);overflow:hidden;cursor:pointer;
   border:1px solid rgba(232,182,76,.30);
   background:linear-gradient(145deg,#241f2e,#12111a);
-  box-shadow:0 16px 40px rgba(0,0,0,.55);
+  /* v144: a kártya NEM mozdul — a top a view felső térközével azonos, tehát a
+     természetes helyén rögzül. A -24px-es árnyék háttérszínű sáv: a fejléc és a
+     kártya közé futó csempéket takarja. Alul 2px rés + 1px arany hajszálvonal
+     választja el a görgő polctól. */
+  box-shadow:0 calc(-1*var(--sp5)) 0 0 var(--bg),
+    0 2px 0 0 var(--bg),0 3px 0 0 rgba(232,182,76,.32),
+    0 16px 40px rgba(0,0,0,.55);
   -webkit-tap-highlight-color:transparent;
   transition:transform .22s var(--spring)}
 #resume:active{transform:scale(.988)}
-/* a polcon CSAK a borító és a rész-szám — a név és az adatok a kinyíló belső
-   oldalon látszanak, ahol van rájuk hely. Kivétel a borító nélküli csempe:
-   ott a név marad, különben azonosíthatatlan lenne. */
+/* v144: a polcon CSAK a borító és a rész-szám — a név és az adatok a kinyíló
+   belső oldalon látszanak. A borító nélküli csempén sincs név (a monogram
+   azonosít): így a rács egységes, és a lustán érkező borítóknál sem villan
+   be a felirat a kép előtt. */
 #lib > .bk > b, #lib > .bk > span, #lib > .bk > .plc,
 #libRest > .bk > b, #libRest > .bk > span, #libRest > .bk > .plc{display:none}
-#lib > .bk.noart > b, #libRest > .bk.noart > b{display:block}
 #resume .rsBg{position:absolute;inset:0}
 #resume .rsBg img{width:100%;height:100%;object-fit:cover;display:block;
   filter:saturate(1.05) contrast(1.02)}
@@ -1261,7 +1267,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v143';
+const APP_VER='v144';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
