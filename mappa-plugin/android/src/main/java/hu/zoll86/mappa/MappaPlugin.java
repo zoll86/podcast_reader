@@ -18,10 +18,14 @@ import com.getcapacitor.annotation.CapacitorPlugin;
 
 import org.json.JSONArray;
 
+import android.speech.tts.TextToSpeech;
+import android.speech.tts.UtteranceProgressListener;
+
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.util.Locale;
 
 /**
  * PODCAST-MAPPA (SAF) — a Kétnyelvű hallgató natív mappa-hozzáférése.
@@ -126,6 +130,9 @@ public class MappaPlugin extends Plugin {
     @Override
     protected void handleOnDestroy() {
         if (szerver != null) szerver.leallit();
+        /* v145: a felolvasó motorja is elengedve */
+        try { if (tts != null) { tts.stop(); tts.shutdown(); } } catch (Throwable ignored) { }
+        tts = null;
         super.handleOnDestroy();
     }
 
@@ -665,6 +672,89 @@ public class MappaPlugin extends Plugin {
         } catch (Exception e) {
             call.reject(e.getMessage());
         }
+    }
+
+    /* ======== v145: MAGYAR FELOLVASÁS (rendszer-TTS) ========
+       A WebView-ban nincs Web Speech API — ezen bukott a v137–138-as próba.
+       A felolvasás ezért itt megy, az Android saját TextToSpeech motorján.
+       A `beszel` AZONNAL visszatér (a hívást nem tartjuk fogva, így nincs
+       lógó kérés); a mondat végét a `ttsVege` esemény hozza az azonosítóval,
+       és a webapp arra folytatja a hangot. Hiba esetén is MINDIG jön esemény
+       (ok:false) — a lejátszás soha nem ragadhat be a felolvasó miatt. */
+    private TextToSpeech tts;
+    private boolean ttsKesz = false;
+    private String ttsVaroSzoveg = null;
+    private String ttsVaroId = null;
+    private float ttsVaroTempo = 1.0f;
+
+    private void ttsJelez(String id, boolean ok) {
+        JSObject r = new JSObject();
+        r.put("id", id == null ? "" : id);
+        r.put("ok", ok);
+        notifyListeners("ttsVege", r);
+    }
+
+    private void ttsMond(String szoveg, float tempo, String id) {
+        try {
+            tts.setSpeechRate(tempo);
+            int e = tts.speak(szoveg, TextToSpeech.QUEUE_FLUSH, null, id);
+            if (e != TextToSpeech.SUCCESS) ttsJelez(id, false);
+        } catch (Throwable t) {
+            ttsJelez(id, false);
+        }
+    }
+
+    private void ttsBiztosit() {
+        if (tts != null) return;
+        tts = new TextToSpeech(getContext(), status -> {
+            ttsKesz = (status == TextToSpeech.SUCCESS);
+            if (ttsKesz) {
+                try { tts.setLanguage(new Locale("hu", "HU")); } catch (Throwable ignored) { }
+                tts.setOnUtteranceProgressListener(new UtteranceProgressListener() {
+                    @Override public void onStart(String id) { }
+                    @Override public void onDone(String id) { ttsJelez(id, true); }
+                    @Override public void onError(String id) { ttsJelez(id, false); }
+                });
+                if (ttsVaroSzoveg != null) {
+                    String sz = ttsVaroSzoveg; float te = ttsVaroTempo; String vid = ttsVaroId;
+                    ttsVaroSzoveg = null; ttsVaroId = null;
+                    ttsMond(sz, te, vid);
+                }
+            } else {
+                /* a motor nem indult el — a várakozó mondatot hibával zárjuk,
+                   hogy a webapp folytathassa a hangot felolvasás nélkül */
+                if (ttsVaroId != null) ttsJelez(ttsVaroId, false);
+                ttsVaroSzoveg = null; ttsVaroId = null;
+                tts = null;
+            }
+        });
+    }
+
+    @PluginMethod
+    public void beszel(PluginCall call) {
+        final String szoveg = call.getString("text", "");
+        final String id = call.getString("id", "u0");
+        final float tempo = (float) (double) call.getDouble("rate", 1.0);
+        JSObject r = new JSObject();
+        r.put("inditva", true);
+        call.resolve(r);
+        if (szoveg == null || szoveg.isEmpty()) { ttsJelez(id, false); return; }
+        final android.app.Activity a = getActivity();
+        if (a == null) { ttsJelez(id, false); return; }
+        a.runOnUiThread(() -> {
+            if (tts != null && ttsKesz) {
+                ttsMond(szoveg, tempo, id);
+            } else {
+                ttsVaroSzoveg = szoveg; ttsVaroTempo = tempo; ttsVaroId = id;
+                ttsBiztosit();
+            }
+        });
+    }
+
+    @PluginMethod
+    public void beszelAllj(PluginCall call) {
+        try { if (tts != null) tts.stop(); } catch (Throwable ignored) { }
+        call.resolve();
     }
 
     private String szepNev(Uri tree) {
