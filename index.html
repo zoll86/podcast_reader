@@ -896,6 +896,12 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
         <button data-k="0">ki</button>
       </div>
       <div class="note" id="hapNote"></div>
+      <label class="lbl">magyar felolvasás a mondat után</label>
+      <div class="seg" id="segFelo">
+        <button data-k="1">be</button>
+        <button data-k="0">ki</button>
+      </div>
+      <div class="note" id="feloNote"></div>
       <label class="lbl">kezelők elrejtése hallgatás közben</label>
       <div class="seg" id="segImm">
         <button data-k="5">5 mp után</button>
@@ -1267,7 +1273,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v144';
+const APP_VER='v145';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -1342,6 +1348,7 @@ var CFG=Object.assign({
   trAheadMin:6,     /* a fordítás ennyi perccel a fej előtt járjon */
   quotaMin:100,     /* óránként ennyi PERC hangot küldünk fel legfeljebb (Groq ingyenes: ~120) */
   hap:1,                       /* v106: haptikus visszajelzés (rezdülés) */
+  huRead:0,                    /* v145: magyar felolvasás minden mondat után (csak APK) */
   /* v102: a tanuló mód (angol szavak beszövése) kikerült — a program
      hallgatásra és olvasásra való. A folyamatos magyar nézet marad. */
   immSec:5, immTip:0, pairs:0, learn:0, weave:1, wDens:1, paged:1, shelf:1,
@@ -1711,6 +1718,64 @@ function memLog(cimke){
 const NATIV=!!(window.Capacitor&&window.Capacitor.isNativePlatform&&
                window.Capacitor.isNativePlatform());
 const MAPPA=(window.Capacitor&&window.Capacitor.Plugins&&window.Capacitor.Plugins.Mappa)||null;
+/* ======== v145: MAGYAR FELOLVASÓ (FELO) ========
+   Minden angol mondat végén: a hang megáll, a rendszer TTS-e felolvassa a
+   magyar fordítást, aztán a hang megy tovább. A natív oldal esemény-alapú
+   (`ttsVege`), itt pedig MINDEN út időkorlátos — ha a motor nem válaszol,
+   a lejátszás legfeljebb pár másodperc múlva magától folytatódik (a v125
+   lógó-kérés leckéje). A `hiv` cserélhető: a tesztek ezen keresztül mérik. */
+const FELO={
+  kozben:false,     /* épp felolvasás megy (a szünet nem felhasználói szünet) */
+  megall:false,     /* a felhasználó a felolvasás alatt állította meg — ne folytassuk */
+  akt:null, n:0, fig:false,
+  hiv:{
+    beszel:o=>MAPPA.beszel(o),
+    allj:()=>MAPPA.beszelAllj()
+  },
+  kesz(id,ok){        /* a natív `ttsVege` esemény ide fut be (és a tesztek is) */
+    const a=FELO.akt;
+    if(a&&String(id)===a.id){ FELO.akt=null; clearTimeout(a.t); a.res(!!ok) }
+  },
+  figyel(){
+    if(FELO.fig||!MAPPA||!MAPPA.addListener) return;
+    FELO.fig=true;
+    try{ MAPPA.addListener('ttsVege',d=>{ if(d) FELO.kesz(d.id,d.ok) }) }catch(e){}
+  },
+  mond(szoveg){
+    return new Promise(res=>{
+      FELO.figyel();
+      const id='hu'+(++FELO.n);
+      /* időkorlát: ~95 ms betűnként, de legalább 4 mp — ha nincs válasz,
+         hibaként zárjuk, és a hang megy tovább */
+      const t=setTimeout(()=>{ if(FELO.akt&&FELO.akt.id===id){ FELO.akt=null; res(false) } },
+        Math.max(4000, String(szoveg||'').length*95));
+      FELO.akt={id,res,t};
+      const tempo=(+CFG.rate>0)?Math.min(1.6,Math.max(0.6,+CFG.rate)):1;
+      try{ FELO.hiv.beszel({text:String(szoveg||''),id:id,rate:tempo}) }
+      catch(e){ FELO.kesz(id,false) }
+    });
+  },
+  allj(){
+    const a=FELO.akt;
+    if(a){ FELO.akt=null; clearTimeout(a.t); a.res(false) }
+    try{ FELO.hiv.allj() }catch(e){}
+  }
+};
+const felKell=()=>!!(CFG.huRead&&NATIV&&MAPPA);
+/* az `elozo` sorszámú (épp befejezett) mondat magyarját olvassuk fel */
+async function felMond(elozo){
+  const rid=REC&&REC.id;
+  const s=REC&&REC.sen&&REC.sen[elozo];
+  if(!s||!s.hu) return;
+  FELO.kozben=true; FELO.megall=false;
+  const jatszott=!A.paused;
+  try{ if(jatszott) A.pause() }catch(e){}
+  await FELO.mond(s.hu);
+  FELO.kozben=false;
+  /* csak akkor folytatjuk, ha mi állítottuk meg, ugyanaz a felvétel szól,
+     és közben a felhasználó nem nyúlt bele */
+  if(jatszott&&!FELO.megall&&REC&&REC.id===rid&&A.paused){ A.play().catch(()=>{}) }
+}
 let SRV=null;                               /* {base,token} */
 async function srvReady(){
   if(!MAPPA) return null;
@@ -7200,11 +7265,15 @@ function tick(){
   if(loopA!=null&&loopB!=null&&t>loopB){ A.currentTime=loopA; return }
   const i=senAt(t);
   if(i>=0&&i!==CUR){
+    const elozo=CUR;      /* v145: az imént BEFEJEZETT mondat — ezt olvassuk fel */
     bankCredit(CUR);      /* az imént befejezett mondat elszámolása */
     CUR=i;
     if(i<WIN[0]+4||i>=WIN[1]-4) renderKara(false); else paintCur(false);
     if(huFlowOn()) renderHu(false);
     saveHint();    try{ motorKisero() }catch(e){}
+    /* v145: csak természetes átlépésnél (elozo→elozo+1) szólal meg — ugrásnál,
+       kereséskor nem; és amíg beszél, nem indul újabb */
+    if(felKell()&&!FELO.kozben&&elozo>=0&&i===elozo+1){ felMond(elozo) }
   }
   heardTick(t); flashTick();
   /* a görgetés minden ciklusban finomodik — ettől lesz a magyar folyam tempója
@@ -7277,7 +7346,9 @@ A.addEventListener('play',()=>{ $('pPlay').textContent='❚❚'; wake(true); med
   try{ motorKisero() }catch(e){ log('kísérő hiba:',e) }
 });
 A.addEventListener('pause',()=>{ $('pPlay').textContent='▶'; wake(false); heardClose();
-  if(REC){ REC.pos=A.currentTime; txtPut(strip(REC)).catch(()=>{}) } });
+  /* v145: a felolvasó szünete nem felhasználói szünet — arra nem mentünk,
+     különben MINDEN mondatnál kiírnánk a teljes rekordot */
+  if(REC&&!FELO.kozben){ REC.pos=A.currentTime; txtPut(strip(REC)).catch(()=>{}) } });
 A.addEventListener('ended',()=>{ $('pPlay').textContent='▶';
   bankCredit(CUR); heardClose(); bankSave(true);
   qAdvance().catch(e=>log('lista-továbblépés:',e));
@@ -7323,6 +7394,7 @@ function mediaMeta(){
    (hallhatatlan), és a seek utáni újraszámítást is jelöljük. */
 function gotoSen(i){
   if(!REC||!REC.sen.length) return;
+  if(FELO.kozben) FELO.allj();   /* v145: ugrásnál a beszéd elhallgat, a hang megy tovább */
   i=Math.max(0,Math.min(REC.sen.length-1,i));
   SEEKTO=i;
   A.currentTime=Math.max(0,REC.sen[i].a+0.02);
@@ -7567,6 +7639,9 @@ $('pPlay').onclick=()=>{
     toast('válaszd ki a hangfájlt — a szöveg és a pozíció megmarad',4500);
     return;
   }
+  /* v145: felolvasás közben a gomb a beszédet állítja le, és a hang állva
+     marad — a következő koppintás indít. Így a szünet-szándék nem vész el. */
+  if(FELO.kozben){ FELO.megall=true; FELO.allj(); return }
   A.paused?A.play().catch(e=>toast('nem indul: '+e.message)):A.pause() };
 $('pPrev').onclick=()=>gotoSen(CUR<=0?0:CUR-1);
 $('pNext').onclick=()=>gotoSen(CUR+1);
@@ -8385,6 +8460,7 @@ async function openRec(rec,fileMaybe){
   /* v143: másik részre lépve az előző rész keretindexe elmegy — egy hosszú
      fájlé 10+ MB, és a részek közti váltogatásnál eddig bent ragadt */
   if(MMED.id&&MMED.id!==rec.id){ MMED.id=''; MMED.M=null }
+  try{ FELO.megall=false; if(FELO.kozben) FELO.allj() }catch(e){}   /* v145 */
   memLog('megnyitás: '+String(rec.name||'').slice(0,24));
   /* v106: a folytatás-csempéhez tudni kell, mit hallgattál utoljára */
   rec.lastAt=Date.now();
@@ -11247,6 +11323,13 @@ function drawSet(){
     if(n) n.textContent=(navigator.vibrate)
       ? 'Rövid rezgés minden koppintásra; a nagyobb tettek (törlés, felismerés indítása) hosszabbat adnak.'
       : 'Ez a változat nem tud rezegni (a rendszer nem adja a rezgés-hozzáférést) — telepítsd az új APK-t, és a telefon beállításaiban legyen bekapcsolva az érintési visszajelzés.'; }
+  segFill($('segFelo'),[[1,'be'],[0,'ki']],CFG.huRead?1:0,k=>{
+    CFG.huRead=+k?1:0; saveCfg(); drawSet();
+    if(CFG.huRead&&!(NATIV&&MAPPA)) toast('a felolvasás csak a telepített appban szól',4000) });
+  { const n=$('feloNote');
+    if(n) n.textContent=(NATIV&&MAPPA)
+      ? 'Minden angol mondat végén a hang megáll, a rendszer felolvassa a magyar fordítást, aztán a hang megy tovább. A telefon Szövegfelolvasó (TTS) beállításában legyen magyar hang. Koppintás beszéd közben: a beszéd elhallgat, a hang állva marad.'
+      : 'Böngészőben nem elérhető — a telepített APK a rendszer felolvasóját használja.'; }
   segFill($('segImm'),[[5,'5 mp után'],[10,'10 mp után'],[0,'soha']],+CFG.immSec||0,k=>{
     CFG.immSec=+k; saveCfg(); drawSet(); if(!k) immSet(false); else immArm() });
   segFill($('segHu'),[['split','alul, felezve'],['pin','gombok felett'],['hide','rejtve']],
@@ -11625,7 +11708,7 @@ addEventListener('beforeunload',()=>{ if(REC){ REC.pos=A.currentTime; try{txtPut
    végigkattintani. */
 window.HG={txtAll,txtGet,txtPut,txtDel,medAll,medGet,medDel,openMedia,cut,
   metaAll,txtLite,liteOf,nSen,nHu,doneS,covLoad,covCached,covStash,memLog,
-  metac:()=>METAC,recCoverSrc,
+  metac:()=>METAC,recCoverSrc,FELO,felKell,felMond,
   audSave,audLoad,audDrop,audKeys,audSizes,freeSpace,bgSaveAudio,adtsOpen,
   log, logs:()=>LOG, fillHu, fillLive,
   setRec:(r,c)=>{ REC=r; if(typeof c==='number') CUR=c; },
