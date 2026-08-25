@@ -1261,7 +1261,7 @@ body.imm header,body.imm #dock{opacity:0;pointer-events:none}
    ===================================================================== */
 
 /* ============ [1] PWA + tárolás ============ */
-const APP_VER='v142';
+const APP_VER='v143';
 const $=id=>document.getElementById(id);
 if('serviceWorker' in navigator){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
@@ -1433,10 +1433,13 @@ function db(){
   /* v26: 2-es verzió a 'bank' tárolóért. A szókincsbank a KÖNYVEKTŐL FÜGGETLENÜL
      él: a hang és a szöveg törölhető, a szókincs marad — épp ez a lényege, hogy egy
      új podcast első percétől tudja, mit hallottál már sokszor. */
-  DB.p=idbOpen('hallgato',2,d=>{
+  /* v143: 3-as verzió a 'cov' tárolóért — a borítók KÜLÖN élnek, hogy a
+     könyvtár rajzolásához soha ne kelljen a teljes (mondatos) rekordot olvasni */
+  DB.p=idbOpen('hallgato',3,d=>{
     if(!d.objectStoreNames.contains('media')) d.createObjectStore('media',{keyPath:'id'});
     if(!d.objectStoreNames.contains('txt'))   d.createObjectStore('txt',{keyPath:'id'});
     if(!d.objectStoreNames.contains('bank'))  d.createObjectStore('bank',{keyPath:'k'});
+    if(!d.objectStoreNames.contains('cov'))   d.createObjectStore('cov',{keyPath:'id'});
   }).catch(e=>{ DB.p=null; throw e });
   return DB.p;
 }
@@ -1571,10 +1574,121 @@ async function freeSpace(){
 const bankPut=r=>dbOp('bank','readwrite',st=>st.put(r));
 const bankAll=()=>dbOp('bank','readonly',st=>st.getAll()).then(r=>r||[]);
 const bankClear=()=>dbOp('bank','readwrite',st=>st.clear());
-const txtPut=r=>dbOp('txt','readwrite',st=>st.put(r));
+const txtPutRaw=r=>dbOp('txt','readwrite',st=>st.put(r));
 const txtGet=id=>dbOp('txt','readonly',st=>st.get(id));
 const txtAll=()=>dbOp('txt','readonly',st=>st.getAll()).then(r=>r||[]);
-const txtDel=id=>dbOp('txt','readwrite',st=>st.delete(id));
+const txtDelRaw=id=>dbOp('txt','readwrite',st=>st.delete(id));
+/* ══════════ v143: KÖNNYŰ INDEX — a „Spotify-modell" ══════════
+   A könyvtár rajzolása eddig MINDEN felvételt teljes mondatszöveggel és base64
+   borítóval olvasott be (txtAll). 1000+ felvételnél ez több tíz megabájt élő
+   objektum minden újrarajzoláskor — a rendszer ezért lőtte ki az appot. A hang
+   sosem volt a hibás: az a mappában marad és streamel. A SZÖVEG lakott bent.
+   Innentől a listázó felület csak könnyű kivonatot lát (liteOf): nevek és
+   számok, mondatok és kép nélkül. A teljes rekord csak megnyitáskor jön be. */
+const LITE_MEZOK=['name','size','dur','kind','added','pos','lastAt','hasAudio',
+  'ach','words','ytid','saf','subMt','subName','hangAt','hangOk','hangHiba'];
+function liteOf(r){
+  const o={lite:1,id:r.id};
+  for(const k of LITE_MEZOK) if(r[k]!==undefined) o[k]=r[k];
+  o.pos=r.pos||0;
+  o.senN=(r.sen||[]).length;
+  o.huN=(r.sen||[]).reduce((n,x)=>n+(x&&x.hu?1:0),0);
+  o.doneS=(r.done||[]).reduce((n,i)=>n+(i[1]-i[0]),0);
+  o.heardS=(r.heard||[]).reduce((n,i)=>n+(i[1]-i[0]),0);
+  o.covN=(r.cover&&r.cover.b&&r.cover.b.length)||0;
+  return o;
+}
+/* kurzorral, egyenként: a csúcsmemória EGY rekord, nem az összes együtt */
+function txtLite(){
+  return db().then(d=>new Promise((res,rej)=>{
+    const t=d.transaction('txt','readonly');
+    const ki=[];
+    const c=t.objectStore('txt').openCursor();
+    c.onsuccess=()=>{ const cu=c.result; if(!cu) return;
+      try{ ki.push(liteOf(cu.value)) }catch(e){}
+      cu.continue(); };
+    t.oncomplete=()=>res(ki);
+    t.onerror=()=>rej(t.error||new Error('a tároló nem olvasható'));
+    t.onabort=()=>rej(t.error||new Error('a művelet megszakadt'));
+  }));
+}
+let METAC=null;            /* a könnyű index a memóriában — pár száz kB összesen */
+async function metaAll(){
+  if(METAC) return METAC;
+  const t0=Date.now();
+  METAC=await txtLite();
+  log('könnyű index: '+METAC.length+' felvétel · '+
+      Math.round(JSON.stringify(METAC).length/1024)+' kB · '+(Date.now()-t0)+' ms');
+  return METAC;
+}
+function metaUpd(r){
+  if(!METAC) return;
+  let o=null; try{ o=r.lite?r:liteOf(r) }catch(e){ return }
+  const i=METAC.findIndex(x=>x.id===r.id);
+  if(i>=0) METAC[i]=o; else METAC.push(o);
+}
+/* ── borítók külön tárolóban: a csempének kép kell, nem 500 mondat ── */
+const COVW={};             /* melyik borító van már félretéve (hossz szerint) */
+const covPut=r=>dbOp('cov','readwrite',st=>st.put(r));
+const covGetDb=id=>dbOp('cov','readonly',st=>st.get(id));
+const covDelDb=id=>dbOp('cov','readwrite',st=>st.delete(id)).catch(()=>{});
+function covStash(r){
+  try{
+    const c=r&&r.cover;
+    if(!c||!c.b||!c.b.length) return;
+    if(COVW[r.id]===c.b.length) return;
+    COVW[r.id]=c.b.length;
+    covPut({id:r.id,mime:c.mime||'',b:c.b}).catch(()=>{ delete COVW[r.id] });
+  }catch(e){}
+}
+/* borító kérésre: előbb a blob-URL gyorstár, aztán a cov tároló, végül —
+   egyszer — a teljes rekord (és az eredmény bekerül a cov tárolóba) */
+async function covLoad(id){
+  if(COVU[id]&&COVU[id].u){ COVU[id].live=1; return COVU[id].u }
+  let c=null;
+  try{ c=await covGetDb(id) }catch(e){}
+  if(!c){
+    let r=null; try{ r=await txtGet(id) }catch(e){}
+    if(r&&r.cover&&r.cover.b&&r.cover.b.length){
+      c={id:id,mime:r.cover.mime||'',b:r.cover.b}; covStash(r);
+    }
+  }
+  if(!c||!c.b||!c.b.length) return '';
+  return coverUrl(id,{mime:c.mime,b:c.b});
+}
+const covCached=id=>(COVU[id]&&COVU[id].u)?(COVU[id].live=1,COVU[id].u):'';
+/* ── biztonsági háló: könnyű kivonatot SOHA nem írunk ki rekordként ──
+   Az letörölné a mondatokat. Ha mégis lite példány érkezik (pl. a csempéről
+   indított hangmérés arra írta az eredményt), a teljes rekordba olvasztjuk:
+   csak a könnyű mezők mennek át, a mondatok és a borító a helyükön maradnak. */
+async function txtPut(r){
+  if(r&&r.lite){
+    const alap=(typeof REC!=='undefined'&&REC&&REC.id===r.id)?strip(REC):await txtGet(r.id);
+    if(!alap||alap.lite){ log('lite-kivonat teljes rekord nélkül — az írás kimarad:',r.id); metaUpd(r); return }
+    for(const k of LITE_MEZOK) if(r[k]!==undefined) alap[k]=r[k];
+    r=alap;
+  }
+  await txtPutRaw(r);
+  covStash(r);
+  metaUpd(r);
+}
+async function txtDel(id){
+  await txtDelRaw(id);
+  covDelDb(id); delete COVW[id];
+  if(METAC){ const i=METAC.findIndex(x=>x.id===id); if(i>=0) METAC.splice(i,1) }
+}
+/* ── memória a naplóban: mérünk, nem találgatunk (WebView-ban elérhető) ── */
+let MEMLAST=0;
+function memLog(cimke){
+  try{
+    const m=performance&&performance.memory; if(!m) return;
+    const u=m.usedJSHeapSize;
+    if(MEMLAST&&Math.abs(u-MEMLAST)<8*1048576) return;   /* csak ha ~8 MB-ot mozdult */
+    MEMLAST=u;
+    log('memória ['+cimke+']: '+(u/1048576).toFixed(1)+' MB használt · plafon '+
+        (m.jsHeapSizeLimit/1048576).toFixed(0)+' MB');
+  }catch(e){}
+}
 /* ======== v63: PODCAST-MAPPA (natív app) ========
    Androidon a böngészőnek nincs könyvtárválasztója, ezért a webapp eddig
    mindent a saját tárolójába másolt — dupla tárhely, és minden hangfájlt
@@ -4713,7 +4827,7 @@ async function backupSave(csendben){
       const bank=await dbOp('bank','readonly',st=>st.getAll())||[];
       for(let i=0;i<bank.length;i+=200) await kuld({t:'bank',d:bank.slice(i,i+200)});
     }catch(e){}
-    const ids=(await txtAll()).map(r=>r.id);
+    const ids=(await metaAll()).map(r=>r.id);
     for(let i=0;i<ids.length;i++){
       let r=null;
       try{ r=await txtGet(ids[i]) }catch(e){}
@@ -4750,7 +4864,7 @@ async function backupLoad(txt){
   }
   let fej=null, recs=0, cache=0, bank=0;
   const megl={};
-  try{ (await txtAll()).forEach(r=>{ megl[r.id]=r }) }catch(e){}
+  try{ (await metaAll()).forEach(r=>{ megl[r.id]=r }) }catch(e){}
   const c=JSON.parse(store.get('hg_cache')||'{}');
   progShow(true); $('progHide').classList.add('hid'); progSet(1,'visszaállítás','olvasás');
   try{
@@ -4764,7 +4878,7 @@ async function backupLoad(txt){
         try{ await dbOp('bank','readwrite',st=>st.put(b)); bank++ }catch(e){} } }
       else if(o.t==='rec'&&o.d&&o.d.id){
         const m=megl[o.d.id];
-        if(!m||(!(m.sen||[]).length&&(o.d.sen||[]).length)){ await txtPut(o.d); recs++ }
+        if(!m||(!nSen(m)&&(o.d.sen||[]).length)){ await txtPut(o.d); recs++ }
       }
       if(i%10===0) progSet(2+i/sorok.length*95,'visszaállítás',recs+' felvétel · '+cache+' fordítás');
       if(i%20===19) await sleep(0);
@@ -4854,7 +4968,7 @@ async function backupAuto(){
     const cur=await MAPPA.current(); if(!cur||!cur.uri) return;
     const volt=+(store.get('bk_last')||0);
     if(Date.now()-volt < 20*3600*1000) return;
-    if(!(await txtAll()).length) return;
+    if(!(await metaAll()).length) return;
     const nev=await backupSave(true);
     if(nev) log('automatikus napi mentés:',nev);
   }catch(e){ log('automatikus mentés:',e) }
@@ -6229,7 +6343,7 @@ function motorForditMind(rec){
 let QSTOP=false;
 async function runQueue(recsIn,cimke){
   try{ await folderBind() }catch(e){}      /* v121: előbb kössük be, ami a mappában van */
-  const todo=(recsIn||[]).filter(r=>r&&!(r.sen||[]).length);
+  const todo=(recsIn||[]).filter(r=>r&&!nSen(r));
   if(!todo.length) return toast('ebben a listában minden résznek van már szövege',5000);
   if(!MAPPA) return toast('az előfelismeréshez a mappás alkalmazás (APK) kell',5000);
   if(!confirm('Előfelismerés — '+(cimke||'lista')+': '+todo.length+
@@ -6319,6 +6433,7 @@ async function save(rec){
 }
 /* a lejátszás közbeni átmeneti mezők nélkül mentünk */
 function strip(rec){
+  if(rec&&rec.lite) return rec;   /* v143: a kivonatot a txtPut hálója olvasztja be */
   return {id:rec.id,name:rec.name,size:rec.size,dur:rec.dur,kind:rec.kind,added:rec.added,
           chaps:rec.chaps||[],done:rec.done,sen:rec.sen,pos:rec.pos||0,words:rec.words||0,
           ver:1,hasAudio:rec.hasAudio?1:0,ach:rec.ach||0,cover:rec.cover||null,
@@ -6394,7 +6509,12 @@ function heardClose(){
   hOpen=null;
 }
 function heardReset(){ hOpen=null; hLast=-1 }
-const heardSec=rec=>doneSec((rec&&rec.heard)||[]);
+const heardSec=rec=>rec&&rec.heardS!=null?rec.heardS:doneSec((rec&&rec.heard)||[]);
+/* v143: a könnyű kivonat számokat hordoz mondatlista helyett — ezek a segédek
+   mindkét alakot értik (teljes rekord ÉS lite kivonat), így a felület egyforma */
+const nSen=r=>r&&r.senN!=null?r.senN:((r&&r.sen)||[]).length;
+const nHu=r=>r&&r.huN!=null?r.huN:((r&&r.sen)||[]).reduce((n,x)=>n+(x&&x.hu?1:0),0);
+const doneS=r=>r&&r.doneS!=null?r.doneS:doneSec((r&&r.done)||[]);
 const heardPct=rec=>{ const d=(rec&&rec.dur)||0; return d?Math.min(100,Math.round(heardSec(rec)/d*100)):0 };
 
 /* Egy mondat akkor kerül a szókincsbankba, ha a lejátszófej folytonosan végigment
@@ -7579,7 +7699,7 @@ const LAP=100;
 async function showList(sh,f,tol){
   const mind=f.items||[];
   let meglevo={};
-  try{ (await txtAll()).forEach(r=>{ meglevo[fdSafe(r.name)]=r }) }catch(e){}
+  try{ (await metaAll()).forEach(r=>{ meglevo[fdSafe(r.name)]=r }) }catch(e){}
   const vege=Math.min(mind.length,tol+LAP);
   const items=[{note:(f.title||sh.n)+' — '+mind.length+' rész'+
     (mind.length>LAP?' ('+(tol+1)+'–'+vege+' látszik)':'')+'. Koppints egy részre: '+
@@ -7728,7 +7848,7 @@ async function hangProba(rec,melyen){
 /* az egész könyvtár átvizsgálása — egy koppintás, és minden csempén ott a jelölés */
 async function hangVizsgal(recs){
   let all=recs;
-  if(!all){ try{ all=await txtAll() }catch(e){ return } }
+  if(!all){ try{ all=await metaAll() }catch(e){ return } }
   all=(all||[]).filter(r=>r&&r.kind!=='yt');
   if(!all.length) return toast('nincs vizsgálható rész');
   MOTOR.szunet=true;                       /* a motor addig ne olvasson bele */
@@ -7763,7 +7883,7 @@ async function hangVizsgal(recs){
 async function folderBind(){
   if(!mappaVan()||!(FOLDER||[]).length) return 0;
   let all=[];
-  try{ all=await txtAll() }catch(e){ return 0 }
+  try{ all=await metaAll() }catch(e){ return 0 }
   const byId={};
   for(const f of FOLDER) byId[safId(f)]=f;
   const byNev={};
@@ -7788,7 +7908,7 @@ async function folderDraw(){
   if(!FOLDER.length){ return }
   /* melyikhez van már szöveg? (a felvétel azonosítója névből+méretből áll) */
   let kesz={};
-  try{ (await txtAll()).forEach(r=>{ kesz[r.id]={n:(r.sen||[]).length,pos:r.pos||0,dur:r.dur||0} }) }catch(e){}
+  try{ (await metaAll()).forEach(r=>{ kesz[r.id]={n:nSen(r),pos:r.pos||0,dur:r.dur||0} }) }catch(e){}
   let elozo=null;
   for(const f of FOLDER){
     if((f.folder||'')!==elozo&&(f.folder||'')===''&&elozo===null){
@@ -7999,7 +8119,7 @@ async function folderLists(csendben){
   if(!MAPPA) return 0;
   if(!(FOLDER||[]).length) await folderScan(true);
   let recs=[];
-  try{ recs=await txtAll() }catch(e){ return 0 }
+  try{ recs=await metaAll() }catch(e){ return 0 }
   const byId={}; recs.forEach(r=>{ byId[r.id]=r });
   /* almappa → a benne lévő, MÁR meglévő felvételek azonosítói (név szerint) */
   const csop={};
@@ -8250,6 +8370,16 @@ function setCover(rec){
   document.body.classList.toggle('hascover',!!COVURL);
 }
 async function openRec(rec,fileMaybe){
+  /* v143: a csempék könnyű kivonatot adnak — lejátszáshoz a teljes rekord kell */
+  if(rec&&rec.lite){
+    const teljes=await txtGet(rec.id).catch(()=>null);
+    if(!teljes){ toast('a felvétel nincs meg a tárolóban'); return }
+    rec=teljes;
+  }
+  /* v143: másik részre lépve az előző rész keretindexe elmegy — egy hosszú
+     fájlé 10+ MB, és a részek közti váltogatásnál eddig bent ragadt */
+  if(MMED.id&&MMED.id!==rec.id){ MMED.id=''; MMED.M=null }
+  memLog('megnyitás: '+String(rec.name||'').slice(0,24));
   /* v106: a folytatás-csempéhez tudni kell, mit hallgattál utoljára */
   rec.lastAt=Date.now();
   /* régi vagy sérült rekord ne dönthesse el az egész programot */
@@ -8525,7 +8655,7 @@ async function addMany(files){
      javasoljuk („Welcome to Night Vale - 250 -…" → „Welcome to Night Vale"). */
   if(felvett.length>1){
     let recs=[];
-    try{ recs=await txtAll() }catch(e){}
+    try{ recs=await metaAll() }catch(e){}
     const byId={}; recs.forEach(r=>byId[r.id]=r);
     const nevek=felvett.map(id=>(byId[id]||{}).name||'').filter(Boolean);
     const javasolt=commonName(nevek)||'új lista';
@@ -8714,7 +8844,7 @@ async function qAdvance(){
 /* Egy lap, ahol minden rész mellett ott a ✕: koppintás = kivétel, és a lap nyitva
    marad, tehát több részt is ki lehet venni egymás után. A felvétel MEGMARAD. */
 async function sheetPrune(lid){
-  let recs=[]; try{ recs=await txtAll() }catch(e){}
+  let recs=[]; try{ recs=await metaAll() }catch(e){}
   const byId={}; recs.forEach(r=>byId[r.id]=r);
   const l=listById(lid); if(!l) return sheetQueue();
   const items=[{note:'Koppints egy részre, és kikerül a listából. A felvétel megmarad '+
@@ -8731,7 +8861,7 @@ async function sheetPrune(lid){
 }
 async function sheetQueue(lid){
   let recs=[];
-  try{ recs=await txtAll() }catch(e){}
+  try{ recs=await metaAll() }catch(e){}
   const byId={}; recs.forEach(r=>byId[r.id]=r);
   const l=lid?listById(lid):(REC?listOf(REC.id):null)||lists()[0];
   if(!l){
@@ -8749,7 +8879,7 @@ async function sheetQueue(lid){
   if(MAPPA){
     /* v92: a saf feltétel törölve — a mappa-hivatkozást a folderFind a
        megnyitáskor pótolja, előre nem kell megkövetelni */
-    const varo=l.items.map(id=>byId[id]).filter(r=>r&&!(r.sen||[]).length);
+    const varo=l.items.map(id=>byId[id]).filter(r=>r&&!nSen(r));
     if(varo.length) items.push({t:'előfelismerés háttérben: '+varo.length+
       ' szöveg nélküli rész (a kész '+(l.items.length-varo.length)+'-t kihagyja)',
       pri:1,fn:()=>{ closeSheet(); runQueue(varo,l.name) }});
@@ -8757,9 +8887,9 @@ async function sheetQueue(lid){
   /* v120: a lista teljes fordítása — a gépen készült SRT-k behúzása után ez az
      egyetlen hátralévő lépés, és eddig nem volt rá egyetlen gomb sem */
   (function(){
-    const fordit=l.items.map(id=>byId[id]).filter(r=>r&&(r.sen||[]).some(x=>!x.hu));
+    const fordit=l.items.map(id=>byId[id]).filter(r=>r&&nSen(r)>nHu(r));
     if(!fordit.length) return;
-    const db=fordit.reduce((n,r)=>n+r.sen.filter(x=>!x.hu).length,0);
+    const db=fordit.reduce((n,r)=>n+(nSen(r)-nHu(r)),0);
     items.push({t:'fordítás elejétől a végéig: '+fordit.length+' rész · '+db+' mondat',
       pri:1,fn:()=>{ closeSheet();
         for(const r of fordit){ delete MOTOR.kihagy[r.id];
@@ -8792,9 +8922,8 @@ async function sheetQueue(lid){
       ((r.dur&&r.pos>=r.dur-8)?' · kész':'');
     /* v99: ✓HU = kész magyar fordítás (a mondatok ≥95%-ának van magyarja) —
        kintről látszik, mi hallgatható fordítással */
-    const sn=r.sen||[];
-    const ford=(sn.length&&sn.filter(s=>s.hu).length/sn.length>=0.95)?' ✓HU':'';
-    items.push({art:recCoverUrl(r),
+    const ford=(nSen(r)&&nHu(r)/nSen(r)>=0.95)?' ✓HU':'';
+    items.push({art:covCached(r.id),
       t:(most?'▶ ':'')+(i+1)+'. '+r.name+ford+hol,pri:most?1:0,
       fn:async()=>{ closeSheet(); await openRec(r); try{ await A.play() }catch(e){} },
       x:{t:'✕',title:'kivétel a listából',fn:()=>{
@@ -8883,7 +9012,7 @@ async function sheetAddTo(rec){
   /* v59: TÖMEGES út — tucatnyi behúzott rész után nem lehet elvárás az
      egyenkénti pakolás. A számláló a listán kívülieket mutatja. */
   let kinn=[];
-  try{ kinn=(await txtAll()).filter(r=>!inAnyList(r.id)) }catch(e){}
+  try{ kinn=(await metaAll()).filter(r=>!inAnyList(r.id)) }catch(e){}
   lists().filter(l=>l!==cur).forEach(l=>items.push({
     t:'→ '+l.name+' ('+l.items.length+')',
     fn:()=>{ listAdd(l.id,rec.id); drawLib(); toast('felvéve: '+l.name); closeSheet() },
@@ -8904,7 +9033,7 @@ async function sheetAddTo(rec){
 }
 async function qFillAll(){
   let recs=[];
-  try{ recs=await txtAll() }catch(e){ return }
+  try{ recs=await metaAll() }catch(e){ return }
   recs=recs.filter(r=>!inAnyList(r.id));
   if(!recs.length){ toast('minden felvétel már listában van'); return }
   recs.sort((a,b)=>String(a.name||'').localeCompare(String(b.name||''),'hu',{numeric:true}));
@@ -9245,6 +9374,42 @@ function coverUrl(key,cov){
     COVU[key]={u:u,n:n,live:1}; return u;
   }catch(e){ return '' }
 }
+/* ══════════ v143: LUSTA BORÍTÓ ══════════
+   A könnyű kivonatban nincs kép — csak azt tudjuk, van-e (covN). A csempe
+   monogrammal születik; a kép akkor jön, amikor a csempe a képernyő közelébe
+   ér. Így egy 300 részes nyitott listánál sem áll össze kép-hegy a memóriában. */
+function recCoverSrc(rec){
+  if(!rec) return '';
+  if(rec.cover&&rec.cover.b&&rec.cover.b.length) return coverUrl(rec.id,rec.cover);
+  const kesz=covCached(rec.id);
+  if(kesz) return kesz;
+  if(rec.covN>0) return {id:rec.id};
+  const l=listOf(rec.id);
+  return (l&&l.cov)?l.cov:'';
+}
+let LAZYIO;
+function lazyArt(){
+  if(LAZYIO!==undefined) return LAZYIO;
+  LAZYIO=(typeof IntersectionObserver==='function')?new IntersectionObserver(ents=>{
+    for(const e of ents){
+      if(!e.isIntersecting) continue;
+      LAZYIO.unobserve(e.target);
+      const id=e.target.dataset.cid; if(!id) continue;
+      covLoad(id).then(u=>{ if(u) artKep(e.target,u) }).catch(()=>{});
+    }
+  },{rootMargin:'240px'}):false;
+  return LAZYIO;
+}
+function artKep(art,url){
+  if(art.querySelector('img')) return;
+  const el=art.closest('.bk');
+  const i=document.createElement('img'); i.alt='';
+  i.onerror=()=>{ i.remove() };
+  i.onload=()=>{ const d=art.querySelector('.ini'); if(d) d.remove();
+    if(el){ try{ el.classList.remove('noart') }catch(e){} } };
+  i.src=url;
+  art.insertBefore(i,art.firstChild);
+}
 function coverSweep(){                       /* ami ebben a körben nem kellett, elmegy */
   for(const k in COVU){
     if(COVU[k].live){ COVU[k].live=0; continue }
@@ -9258,14 +9423,26 @@ const bkPos=r=>{ const d=r.dur||0; return d?Math.min(100,Math.round((r.pos||0)/d
 /* A borító helye: EGY kép vagy monogram. (A v38 listánál mozaikot rakott össze a
    részek borítóiból — zajos volt, és egyetlen hibás kép is elrontotta az egészet.)
    Ha a kép mégsem tölt be, a monogramra esünk vissza, nem hagyunk törött ikont. */
-function bkArt(el,url,name){
+function bkArt(el,src,name){
   const art=el.querySelector('.art');
+  /* v143: src lehet kész URL (szöveg) vagy lusta hivatkozás ({id}) */
+  const url=(typeof src==='string')?src:'';
+  const lusta=(src&&typeof src==='object'&&src.id)?String(src.id):'';
   /* v136: ha nincs valódi borító, a csempén marad a név (a polcon a többinél
      elrejtjük) — enélkül a kép nélküli sorozatok megkülönböztethetetlenek */
   try{ el.classList.toggle('noart',!url) }catch(e){}
   const ini=()=>{ const d=document.createElement('div'); d.className='ini';
     d.textContent=name?bkIni(name):'?'; art.insertBefore(d,art.firstChild) };
-  if(!url){ ini(); return }
+  if(!url){
+    ini();
+    if(lusta){
+      art.dataset.cid=lusta;
+      const io=lazyArt();
+      if(io) io.observe(art);
+      else covLoad(lusta).then(u=>{ if(u) artKep(art,u) }).catch(()=>{});
+    }
+    return;
+  }
   const i=document.createElement('img'); i.alt='';
   i.onerror=()=>{ i.remove(); ini(); try{ el.classList.add('noart') }catch(e){} };
   i.src=url;
@@ -9277,8 +9454,8 @@ function bkCard(r,part){
   el.innerHTML='<div class="art"><div class="scrim"></div>'+
     '<div class="hbar"><i></i></div><div class="bar"><i></i></div></div>'+
     '<div class="plc"></div><b></b><span></span><button class="more">⋯</button>';
-  bkArt(el,recCoverUrl(r),r.name);
-  const pos=bkPos(r), hp=heardPct(r), pct=r.dur?Math.round(doneSec(r.done||[])/r.dur*100):0;
+  bkArt(el,recCoverSrc(r),r.name);
+  const pos=bkPos(r), hp=heardPct(r), pct=r.dur?Math.round(doneS(r)/r.dur*100):0;
   el.querySelector('.bar i').style.width=pos+'%';
   el.querySelector('.hbar i').style.width=hp+'%';
   el.querySelector('b').textContent=r.name;
@@ -9301,11 +9478,10 @@ function bkCard(r,part){
      tömörebb egyszerre. Az összesített idő és haladás a lista lapjának
      fejlécében látszik, ahol tényleg számít. A hiányjelzések (szöveg ✗, hang ✗)
      megmaradnak, mert azok tennivalót jelentenek. */
-  const nincsSzoveg=!(r.sen&&r.sen.length);
+  const nincsSzoveg=!nSen(r);
   /* v100: ✓HU a csempén — kész magyar fordítás (a mondatok ≥95%-ának van
      magyarja). Innen látszik, mi hallgatható most, fordításra várás nélkül. */
-  const sn=r.sen||[];
-  const huKesz=sn.length&&sn.filter(s=>s.hu).length/sn.length>=0.95;
+  const huKesz=nSen(r)&&nHu(r)/nSen(r)>=0.95;
   el.querySelector('span').innerHTML=
     (huKesz?'<span class="huok">HU</span>':'')+
     (pct>0&&pct<99?(huKesz?' · ':'')+'<span class="pill part">'+pct+'%</span>'
@@ -9325,7 +9501,11 @@ function bkCard(r,part){
 /* a lista borítója: kézi választás, különben az első rész beágyazott képe */
 function listCover(l,met){
   if(l.cov) return l.cov;                       /* dataURL, a CFG-ben */
-  for(const r of met){ const u=coverUrl(r.id,r.cover); if(u) return u }
+  for(const r of met){
+    if(r.cover&&r.cover.b&&r.cover.b.length){ const u=coverUrl(r.id,r.cover); if(u) return u }
+    const k=covCached(r.id); if(k) return k;
+  }
+  for(const r of met) if(r.covN>0) return {id:r.id};   /* lustán tölti a bkArt */
   return '';
 }
 function bkListCard(l,met,byId){
@@ -9391,9 +9571,11 @@ function drawResume(recs,byId){
     return null;
   })();
   const pct=jelolt.dur?Math.min(99,Math.round(jelolt.pos/jelolt.dur*100)):0;
-  const sn=jelolt.sen||[];
-  const hu=sn.length&&sn.filter(s=>s.hu).length/sn.length>=0.95;
-  const art=recCoverUrl(jelolt);
+  const hu=nSen(jelolt)&&nHu(jelolt)/nSen(jelolt)>=0.95;
+  /* v143: a kivonatban nincs kép — ami már blob-URL, azt rögtön; a többit lustán */
+  let art=covCached(jelolt.id);
+  if(!art&&jelolt.cover&&jelolt.cover.b&&jelolt.cover.b.length) art=coverUrl(jelolt.id,jelolt.cover);
+  if(!art){ const l0=listOf(jelolt.id); if(l0&&l0.cov) art=l0.cov }
   /* v108: a rész címéből levágjuk a sorszámot és a sorozat nevét, ha az a
      feliratban már ott van — kétszer ugyanazt olvasni zaj, nem információ */
   let cim=String(jelolt.name||'').replace(/^\s*\d{1,4}\s*[-–—.]\s*/,'');
@@ -9428,12 +9610,23 @@ function drawResume(recs,byId){
       im.src=art;
     }
   }
+  if(!art&&jelolt.covN){
+    covLoad(jelolt.id).then(u=>{
+      if(!u) return;
+      const bg=host.querySelector('.rsBg'); if(!bg) return;
+      const im=document.createElement('img'); im.alt='';
+      im.onload=()=>{ const d=host.querySelector('.rsIni'); if(d) d.remove() };
+      im.src=u; bg.appendChild(im);
+    }).catch(()=>{});
+  }
   host.onclick=()=>{ buzz(16); openRecById(jelolt.id) };
 }
 async function drawLib(){
   const box=$('lib');
   let recs=[];
-  try{ recs=await txtAll() }catch(e){ box.innerHTML='<div class="note">a tároló nem elérhető: '+e.message+'</div>'; return }
+  /* v143: a polc a könnyű indexből rajzol — nem olvassuk be az összes mondatot */
+  try{ recs=await metaAll() }catch(e){ box.innerHTML='<div class="note">a tároló nem elérhető: '+e.message+'</div>'; return }
+  memLog('könyvtár');
   $('firstRun').classList.toggle('hid',!!recs.length&&!!CFG.asrKey);
   if(!recs.length){ box.innerHTML=''; return }
   const byId={}; recs.forEach(r=>byId[r.id]=r);
@@ -9477,7 +9670,7 @@ async function drawLib(){
         const oKesz=met.filter(r=>r.dur&&r.pos>=r.dur-8).length;
         const oFoly=listResume(l,byId);
         const oHol=oFoly?(l.items.indexOf(oFoly)+1):1;
-        const oSzoveg=met.filter(r=>(r.sen||[]).length).length;
+        const oSzoveg=met.filter(r=>nSen(r)).length;
         cap.innerHTML='<span><b>'+esc(l.name)+'</b> — '+met.length+' rész · '+
           fmtT(oHossz)+'<br><i>'+fmtT(oPos)+' meghallgatva ('+
           (oHossz?Math.round(oPos/oHossz*100):0)+'%) · '+oKesz+' rész kész · '+
@@ -9538,7 +9731,7 @@ async function drawLib(){
     if(rb){ rb.classList.add('hid'); rb.innerHTML='' } }
   /* egy sor egy felvételhez */
   const sor=(r,sub)=>{
-    const pct=r.dur?Math.round(doneSec(r.done||[])/r.dur*100):0;
+    const pct=r.dur?Math.round(doneS(r)/r.dur*100):0;
     const el=document.createElement('div');
     el.className='item'+(sub?' sub':'');
     el.innerHTML='<div class="body"><b></b><span></span><div class="bar"><i></i></div></div>'+
@@ -9547,7 +9740,7 @@ async function drawLib(){
     const l=listOf(r.id), qi=l?l.items.indexOf(r.id):-1;
     el.querySelector('b').innerHTML=(qi>=0?'<span class="qnum">'+(qi+1)+'.</span> ':'')+esc(r.name);
     const hp=heardPct(r);
-    el.querySelector('.body > span').innerHTML=fmtT(r.dur)+' · '+(r.sen?r.sen.length:0)+' mondat · '+
+    el.querySelector('.body > span').innerHTML=fmtT(r.dur)+' · '+nSen(r)+' mondat · '+
       '<span class="pill '+(pct>=99?'ok':(pct>0?'part':''))+'">'+pct+'%</span>'+
       (hp>0?' <span class="pill '+(hp>=90?'ok':'part')+'">hallgatva '+hp+'%</span>':'')+
       (r.kind==='yt'?' <span class="pill">YouTube</span>':
@@ -10388,8 +10581,8 @@ async function coverProbe(){
 }
 async function coverProbeBelso(){
   let all=[];
-  try{ all=await txtAll() }catch(e){ return }
-  const jelolt=all.filter(r=>!(r.cover&&r.cover.b&&r.cover.b.length)).slice(0,3);
+  try{ all=await metaAll() }catch(e){ return }
+  const jelolt=all.filter(r=>!r.covN).slice(0,3);
   if(!jelolt.length) return toast('minden résznek van borítója');
   const hex=u=>Array.from(u).map(x=>x.toString(16).padStart(2,'0')).join(' ');
   const txt=u=>Array.from(u).map(x=>(x>=32&&x<127)?String.fromCharCode(x):'.').join('');
@@ -10425,8 +10618,8 @@ async function coverProbeBelso(){
 async function coverGather(quiet){
   if(!MAPPA){ if(!quiet) toast('ez a mappás alkalmazásban (APK) megy'); return }
   let all=[];
-  try{ all=await txtAll() }catch(e){ return }
-  const nincs=all.filter(r=>!(r.cover&&r.cover.b&&r.cover.b.length));
+  try{ all=await metaAll() }catch(e){ return }
+  const nincs=all.filter(r=>!r.covN);
   if(!nincs.length){
     if(!quiet) toast('minden résznek van már borítója',4000);
     return;
@@ -10458,8 +10651,12 @@ async function coverGather(quiet){
       if(nezve<=3) log('borító-vizsgálat '+nezve+' eredménye: '+
         (c&&c.b?('kép '+c.mime+' '+fmtMB(c.b.length)):'nincs kép'));
       if(c&&c.b&&c.b.length){
-        rec.cover=c;
-        await save(rec);
+        /* v143: a keresés a könnyű indexen fut — a kép a TELJES rekordra kerül,
+           különben a mentés hálója (jogosan) eldobná a nehéz mező változását */
+        const teljes=await txtGet(rec.id).catch(()=>null);
+        if(!teljes) continue;
+        teljes.cover=c;
+        await save(teljes);
         kep++;
         if(REC&&REC.id===rec.id) frissul=true;
         if(kep<=3) log('borító pótolva: '+String(rec.name||'').slice(0,50)+
@@ -10495,7 +10692,7 @@ async function subsSync(quiet){
     return;
   }
   let all=[];
-  try{ all=await txtAll() }catch(e){ return }
+  try{ all=await metaAll() }catch(e){ return }
   const byN={};
   for(const r of all){ const k=subNorm(r.name); if(k) (byN[k]=byN[k]||[]).push(r) }
   let uj=0,csere=0,arva=0; const arvak=[];
@@ -10509,7 +10706,7 @@ async function subsSync(quiet){
       else { arva++; if(arvak.length<5) arvak.push(f.name); continue }
     }
     for(const rec of recs){
-      const volt=(rec.sen||[]).length;
+      const volt=nSen(rec);
       /* v96: a felirat a FŐ forrás — a felismert szöveget is lecseréli.
          Egyetlen kihagyási ok maradt: a fájl nem újabb az utolsó betöltésnél. */
       if(rec.subMt&&+(f.mtime||0)<=+rec.subMt) continue;
@@ -10518,11 +10715,15 @@ async function subsSync(quiet){
       catch(e){ log('felirat-olvasás hiba ('+f.name+'): '+String(e&&(e.message||e)).slice(0,60)); continue }
       const sen=parseSrt(raw);
       if(!sen.length){ log('felirat: '+f.name+' — nem találtam mondatokat'); continue }
-      rec.sen=sen;
-      rec.done=mergeDone([],0,sen[sen.length-1].b);
-      if(!(rec.dur>1)) rec.dur=sen[sen.length-1].b;
-      rec.subMt=+(f.mtime||Date.now()); rec.subName=f.name;
-      await save(rec);
+      /* v143: az egyeztetés a könnyű indexen fut — a mondatok a TELJES rekordba
+         kerülnek (a mentés hálója a lite példány sen-jét jogosan dobná el) */
+      const teljes=(REC&&REC.id===rec.id)?REC:await txtGet(rec.id).catch(()=>null);
+      if(!teljes) continue;
+      teljes.sen=sen;
+      teljes.done=mergeDone([],0,sen[sen.length-1].b);
+      if(!(teljes.dur>1)) teljes.dur=sen[sen.length-1].b;
+      teljes.subMt=+(f.mtime||Date.now()); teljes.subName=f.name;
+      await save(teljes);
       volt?csere++:uj++;
       log('felirat betöltve: '+f.name+' → '+rec.name+' ('+sen.length+' mondat'+
           (volt?', a régi lecserélve':'')+
@@ -10845,7 +11046,10 @@ function exportTsv(r){
   dl(r.name.replace(/[^\w\-]+/g,'_')+'_ketnyelvu.tsv',out.join('\n'));
   toast(out.length+' mondatpár kiírva');
 }
-function sheetItem(r){
+async function sheetItem(r){
+  /* v143: a csempéről kivonat jön — a menü műveletei (elölről, kivitel,
+     újrafordítás) a teljes rekordot kívánják */
+  if(r&&r.lite){ const t=await txtGet(r.id).catch(()=>null); if(t) r=t; }
   const inL=listOf(r.id);
   sheet(r.name,[
     {t:'megnyitás',pri:1,fn:()=>openRec(r)},
@@ -11104,8 +11308,8 @@ $('costReset').onclick=()=>{ spend={asrSec:0,tin:0,tout:0,calls:0}; saveSpend();
 async function drawStore(){
   let s='';
   try{
-    const recs=await txtAll(), meds=await medAll();
-    const sen=recs.reduce((a,r)=>a+(r.sen?r.sen.length:0),0);
+    const recs=await metaAll(), meds=await medAll();
+    const sen=recs.reduce((a,r)=>a+nSen(r),0);
     const bytes=meds.reduce((a,m)=>a+(m.size||0),0)+await audSizes().catch(()=>0);
     s='felvételek: '+recs.length+' · mondat: '+sen+'<br>mentett hang: '+meds.length+' fájl, '+fmtMB(bytes)+
       '<br>fordítás-gyorstár: '+Object.keys(cache).length+' mondat';
@@ -11146,8 +11350,8 @@ $('clrBank').onclick=async()=>{
 $('clrAll').onclick=async()=>{
   if(!confirm('Minden felvétel, felismert szöveg és beállítás törlése?')) return;
   BG.stop=true; JOB.stop=true;
-  try{ const recs=await txtAll();
-    for(const r of recs){ await txtDel(r.id); await audDrop(r.id).catch(()=>{}); await medDel(r.id).catch(()=>{}) } }catch(e){}
+  try{ const recs=await metaAll();
+    for(const r of recs.slice()){ await txtDel(r.id); await audDrop(r.id).catch(()=>{}); await medDel(r.id).catch(()=>{}) } }catch(e){}
   cache={}; pcache={}; BANK={}; NGR={};
   try{ await bankClear() }catch(e){}
   store.del('hg_cache'); store.del('hg_spend');
@@ -11205,9 +11409,14 @@ async function onvizsgalat(){
 
   /* a vizsgált felvétel: a megnyitott, vagy az első a mappából */
   let rec=REC;
-  if(!rec){
-    try{ const all=await txtAll(); rec=all&&all[0] }catch(e){}
-  }
+  try{
+    const all=await metaAll();
+    log('7a. tároló: '+all.length+' felvétel · könnyű index '+
+        Math.round(JSON.stringify(all).length/1024)+' kB · borító-gyorstár '+
+        Object.keys(COVW).length+' kép');
+    memLog('önvizsgálat');
+    if(!rec&&all[0]) rec=await txtGet(all[0].id).catch(()=>null);
+  }catch(e){}
   if(!rec){ log('7. nincs vizsgálható felvétel — nyiss meg egyet, és futtasd újra'); }
   else{
     log('7. vizsgált rész: '+String(rec.name||'').slice(0,50)+' · hossz '+fmtT(rec.dur||0)+
@@ -11409,6 +11618,8 @@ addEventListener('beforeunload',()=>{ if(REC){ REC.pos=A.currentTime; try{txtPut
    megnézhető és javítható a tároló tartalma anélkül, hogy a felületet kellene
    végigkattintani. */
 window.HG={txtAll,txtGet,txtPut,txtDel,medAll,medGet,medDel,openMedia,cut,
+  metaAll,txtLite,liteOf,nSen,nHu,doneS,covLoad,covCached,covStash,memLog,
+  metac:()=>METAC,recCoverSrc,
   audSave,audLoad,audDrop,audKeys,audSizes,freeSpace,bgSaveAudio,adtsOpen,
   log, logs:()=>LOG, fillHu, fillLive,
   setRec:(r,c)=>{ REC=r; if(typeof c==='number') CUR=c; },
@@ -11459,6 +11670,7 @@ window.HG={txtAll,txtGet,txtPut,txtDel,medAll,medGet,medDel,openMedia,cut,
   .forEach(x=>{ try{ x[1]() }catch(e){ log('indulási hiba ('+x[0]+'):',e) } });
 setHdrVar();
 log('indulás',APP_VER);
+memLog('indulás');
 </script>
 </body>
 </html>
